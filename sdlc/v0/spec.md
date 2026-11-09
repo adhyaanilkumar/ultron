@@ -22,7 +22,7 @@ the owner should confirm or change it during this review.
 | D5 | Failed tasks go to **Jira** as tickets on a Mon–Fri sprint (§8). This replaces "CLI or minimal web page" for the escalation board in intent §5. Intake stays a file, so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | ultron **proposes each release's version** from the intent, and a person confirms it at the spec gate (§9). Same scheme as social-grid. | Confirmed |
 | D7 | ultron checks before every run that the user is **signed in to a Claude Code account** (§10). | Confirmed |
-| D8 | CLI look: the owner's Ultron pixel-art head, full size (20×28, 14 terminal lines), in dark gunmetal steel `#7A828A` with `#941212` eyes. CLI text uses the owner's palette. Claude's orange marks agent activity (§11). | Confirmed |
+| D8 | CLI look: the owner's Ultron pixel-art head, full size (20×28, 14 terminal lines), in dark gunmetal steel `#7A828A` with `#941212` eyes. The wordmark is crimson `#E5484D`. Other CLI text uses the owner's palette. Claude's orange marks agent activity (§11). | Confirmed |
 | D9 | Shape: one **CLI engine outside the agents**. Each requirement's files live in the **target repo**. The evaluation harness and cross-repo totals live in a central **ultron home**. A Claude Code plugin is optional and later. Researched 2026-11-09: a Claude session can't guarantee the gates and attempt limit, but a Python state machine can. | Proposed |
 | D10 | State: **SQLite** (state machine, attempt counters, gate records, agent-call log) plus **files for every artifact**. Answers intent §10 "How task state is stored". | Proposed |
 | D11 | ultron **commits each requirement's artifacts** on its own branches in the target repo. A person merges. | Proposed |
@@ -301,7 +301,8 @@ HHHHHHHHCHHCHHHHHHHH
 
 | Use | Colour |
 |---|---|
-| The `U L T R O N` wordmark, main text | `#c9c9c9` |
+| The `U L T R O N` wordmark | Crimson `#E5484D`, bold (the owner's choice, 2026-11-09) |
+| Main text | `#c9c9c9` |
 | Emphasis | `#f2f2f2` |
 | Borders, dim text, the tagline | Gunmetal `#7A828A`, which matches the head |
 | The ✖ marker on failures and escalations | `#941212` |
