@@ -22,7 +22,7 @@ the owner should confirm or change it during this review.
 | D5 | Failed tasks go to **Jira** as tickets on a Mon–Fri sprint (§8). This replaces "CLI or minimal web page" for the escalation board in intent §5. Intake stays a file, so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | ultron **proposes each release's version** from the intent, and a person confirms it at the spec gate (§9). Same scheme as social-grid. | Confirmed |
 | D7 | ultron checks before every run that the user is **signed in to a Claude Code account** (§10). | Confirmed |
-| D8 | CLI look: an Ultron red-and-steel theme. The mascot is the owner's Ultron pixel-art head with soft crimson eyes (`#E5484D`). Claude's orange marks agent activity (§11). | Confirmed |
+| D8 | CLI look: the owner's palette (`#262626`, `#b3b3b3`, `#c9c9c9`, `#f2f2f2`, `#941212`). The mascot is the owner's Ultron pixel-art head, 20×14, with `#941212` eyes. Claude's orange marks agent activity (§11). | Confirmed |
 | D9 | Shape: one **CLI engine outside the agents**. Each requirement's files live in the **target repo**. The evaluation harness and cross-repo totals live in a central **ultron home**. A Claude Code plugin is optional and later. Researched 2026-11-09: a Claude session can't guarantee the gates and attempt limit, but a Python state machine can. | Proposed |
 | D10 | State: **SQLite** (state machine, attempt counters, gate records, agent-call log) plus **files for every artifact**. Answers intent §10 "How task state is stored". | Proposed |
 | D11 | ultron **commits each requirement's artifacts** on its own branches in the target repo. A person merges. | Proposed |
@@ -251,48 +251,50 @@ credentials itself.
 
 ## 11. CLI look: palette and mascot
 **Mascot.** The owner's choice (2026-11-09): the Ultron pixel-art head from the owner's reference image, redrawn
-cell by cell without the image's watermark. The eyes are soft crimson and always stay red. The source image is not
-committed.
+cell by cell without the image's watermark. The eyes are red. The source image is not committed.
 - **Where it appears:** beside the wordmark in `ultron`, `ultron doctor` and `ultron status`.
-- **Rendering:** with half-block characters, 10 columns by 7 lines. `--quiet`, non-TTY output and `NO_COLOR` hide it.
-- **Grid:** the owner asked for it smaller (2026-11-09), so this is the 20×28 trace scaled down to 10×14. Any eye pixel
-  survives the scale-down, and the eye rows were adjusted by hand to keep the two eyes as separate slanted red slits.
+- **Rendering:** with half-block characters, 20 columns by 7 lines. `--quiet`, non-TTY output and `NO_COLOR` hide it.
+- **Grid:** the full-width 20×28 trace with only its height halved, to 20×14. The owner asked for it wider but not
+  longer (2026-11-09). Eye pixels always survive the scale-down. One trace row was mirrored to make it symmetric.
 
-| Code | Part | Colour |
+```
+.....HHHLLLLHHH.....
+...HHHHHHHHHHHHHH...
+S.HCCHHHHHHHHHHCCH.S
+S.HHCHHHHHHHHHHCHH.S
+S.HHCHHHHHHHHHHCHH.S
+S.HCHHHHHHHHHHHHCH.S
+HHHEEEHHHHHHHHEEEHHH
+HHHHEEEEEHHEEEEEHHHH
+HHHHHFHHCHHCHHFHHHHH
+.HFHFFFFHHHHFFFFHFH.
+..HHFFFFFFFFFFFFHH..
+....HFFFHFFHFFFH....
+.....HHHHHHHHHH.....
+.......HHHHHH.......
+```
+
+**Palette.** The owner's palette (2026-11-09):
+
+| Code | Use | Colour |
 |---|---|---|
-| `H` | Head | Steel `#C0C6CC` (on a dark terminal the original black would be invisible) |
-| `C` | Forehead creases | Dim steel `#7A828A` |
-| `E` | Eyes | Soft crimson `#E5484D` |
-| `F` | Mouth and cheek gaps | Dark `#2A2E33` |
+| `F` | Mouth and cheek gaps | `#262626` |
+| `C`, `S` | Forehead creases and side fins; borders and dim text in the CLI | `#b3b3b3` |
+| `H` | Head; main text and the `U L T R O N` wordmark in the CLI | `#c9c9c9` |
+| `L` | Highlight on the head; emphasis in the CLI | `#f2f2f2` |
+| `E` | Eyes; the ✖ marker on failures and escalations | `#941212` |
 | `.` | Background | Terminal background |
 
-```
-...HHHH...
-..HHHHHH..
-.HHHHHHHH.
-HHCHHHHCHH
-HHCHHHHCHH
-HHHHHHHHHH
-HEEHHHHEEH
-HHEEHHEEHH
-HHHHCCHHHH
-HFFFHHFFFH
-.HFFFFFFH.
-..HFHHFH..
-...HHHH...
-....HH....
-```
+Status colours, which stay as they were:
 
-**Palette.** Soft crimson, the owner's choice (2026-11-09). The first draft's `#E10600` was too bright.
-
-| Use | Colour |
+| State | Colour and marker |
 |---|---|
-| Brand, the mascot's eyes, headers | Soft crimson `#E5484D` (lighter `#F2777B` for highlights) |
-| Main text, borders, the mascot's head | Steel `#C0C6CC`, dim steel `#7A828A` |
-| Claude agent activity | Claude orange `#D97757`, with ● |
+| Claude agent is running | Claude orange `#D97757`, with ● |
 | Passed or approved | Green `#3FB950`, with ✔ |
 | Waiting on you | Amber `#E3B341`, with ⏳ |
-| Failed, rejected or escalated | Bold brand red, always with ✖ and a word, so failure doesn't rely on colour alone |
+
+**Concern.** `#941212` is a dark red. As text on a dark terminal its contrast is about 2:1, which is hard to read.
+So failure lines use it only for the ✖ marker and the eyes, and the words stay `#f2f2f2`. The owner can change this.
 
 **Terminals.**
 - On Windows, ultron forces UTF-8 output. The default cp1252 console encoding crashes on block characters; found
