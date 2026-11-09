@@ -22,7 +22,7 @@ the owner should confirm or change it during this review.
 | D5 | Failed tasks go to **Jira** as tickets on a Mon–Fri sprint (§8). This replaces "CLI or minimal web page" for the escalation board in intent §5. Intake stays a file, so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | ultron **proposes each release's version** from the intent, and a person confirms it at the spec gate (§9). Same scheme as social-grid. | Confirmed |
 | D7 | ultron checks before every run that the user is **signed in to a Claude Code account** (§10). | Confirmed |
-| D8 | CLI look: the owner's palette (`#262626`, `#b3b3b3`, `#c9c9c9`, `#f2f2f2`, `#941212`). The mascot is the owner's Ultron pixel-art head, 20×14, with `#941212` eyes. Claude's orange marks agent activity (§11). | Confirmed |
+| D8 | CLI look: the owner's Ultron pixel-art head, full size (20×28, 14 terminal lines), in dark gunmetal steel `#7A828A` with `#941212` eyes. CLI text uses the owner's palette. Claude's orange marks agent activity (§11). | Confirmed |
 | D9 | Shape: one **CLI engine outside the agents**. Each requirement's files live in the **target repo**. The evaluation harness and cross-repo totals live in a central **ultron home**. A Claude Code plugin is optional and later. Researched 2026-11-09: a Claude session can't guarantee the gates and attempt limit, but a Python state machine can. | Proposed |
 | D10 | State: **SQLite** (state machine, attempt counters, gate records, agent-call log) plus **files for every artifact**. Answers intent §10 "How task state is stored". | Proposed |
 | D11 | ultron **commits each requirement's artifacts** on its own branches in the target repo. A person merges. | Proposed |
@@ -250,40 +250,61 @@ If any check fails, ultron stops and prints the fix, for example `claude auth lo
 credentials itself.
 
 ## 11. CLI look: palette and mascot
-**Mascot.** The owner's choice (2026-11-09): the Ultron pixel-art head from the owner's reference image, redrawn
-cell by cell without the image's watermark. The eyes are red. The source image is not committed.
+**Mascot.** The owner's choice (2026-11-09): the Ultron pixel-art head from the owner's reference image, at full
+size and redrawn cell by cell without the image's watermark. It's dark gunmetal steel, as in the movie, with red eyes.
+The source image is not committed.
 - **Where it appears:** beside the wordmark in `ultron`, `ultron doctor` and `ultron status`.
-- **Rendering:** with half-block characters, 20 columns by 7 lines. `--quiet`, non-TTY output and `NO_COLOR` hide it.
-- **Grid:** the full-width 20×28 trace with only its height halved, to 20×14. The owner asked for it wider but not
-  longer (2026-11-09). Eye pixels always survive the scale-down. One trace row was mirrored to make it symmetric.
+- **Rendering:** with half-block characters, 20 columns by 14 lines. `--quiet`, non-TTY output and `NO_COLOR` hide it.
+- **Grid:** 20×28. One trace row was mirrored to make it symmetric.
 
 ```
+.......HHHHHH.......
 .....HHHLLLLHHH.....
+....HHHHHHHHHHHH....
 ...HHHHHHHHHHHHHH...
-S.HCCHHHHHHHHHHCCH.S
+..HCHHHHHHHHHHHHCH..
+S.HHCHHHHHHHHHHCHH.S
+S.HHCHHHHHHHHHHCHH.S
+S.HHCHHHHHHHHHHCHH.S
 S.HHCHHHHHHHHHHCHH.S
 S.HHCHHHHHHHHHHCHH.S
 S.HCHHHHHHHHHHHHCH.S
-HHHEEEHHHHHHHHEEEHHH
-HHHHEEEEEHHEEEEEHHHH
-HHHHHFHHCHHCHHFHHHHH
+S.HHHHHHHHHHHHHHHH.S
+HHHEHHHHHHHHHHHHEHHH
+HHHHEEHHHHHHHHEEHHHH
+HHHHEEEEHHHHEEEEHHHH
+HHHHHHEEEHHEEEHHHHHH
+HHHHHHHHCHHCHHHHHHHH
+.HHHHFHHCHHCHHFHHHH.
+.HFHFFFHHHHHHFFFHFH.
 .HFHFFFFHHHHFFFFHFH.
-..HHFFFFFFFFFFFFHH..
+..HHFFFFHFFHFFFFHH..
+...HHFFFFFFFFFFHH...
 ....HFFFHFFHFFFH....
+....HHFFHHHHFFHH....
 .....HHHHHHHHHH.....
+......HHHHHHHH......
 .......HHHHHH.......
+........HHHH........
 ```
 
-**Palette.** The owner's palette (2026-11-09):
-
-| Code | Use | Colour |
+| Code | Part | Colour |
 |---|---|---|
+| `H` | Head | Gunmetal `#7A828A` |
+| `C`, `S` | Forehead creases, side fins | Dark gunmetal `#5A6168` |
+| `L` | Shine on top of the head | `#b3b3b3` |
+| `E` | Eyes | `#941212` |
 | `F` | Mouth and cheek gaps | `#262626` |
-| `C`, `S` | Forehead creases and side fins; borders and dim text in the CLI | `#b3b3b3` |
-| `H` | Head; main text and the `U L T R O N` wordmark in the CLI | `#c9c9c9` |
-| `L` | Highlight on the head; emphasis in the CLI | `#f2f2f2` |
-| `E` | Eyes; the ✖ marker on failures and escalations | `#941212` |
 | `.` | Background | Terminal background |
+
+**CLI text colours.** These come from the owner's palette (2026-11-09):
+
+| Use | Colour |
+|---|---|
+| The `U L T R O N` wordmark, main text | `#c9c9c9` |
+| Emphasis | `#f2f2f2` |
+| Borders, dim text, the tagline | Gunmetal `#7A828A`, which matches the head |
+| The ✖ marker on failures and escalations | `#941212` |
 
 Status colours, which stay as they were:
 
