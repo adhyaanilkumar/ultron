@@ -29,6 +29,7 @@ the owner should confirm or change it during this review.
 | D12 | Evaluation set: **SWE-bench Verified, sympy (75) and pytest (19) issues**. Start with a **5-requirement pilot** to measure real usage, then ask before the full run. | Proposed |
 | D13 | Evaluation runs don't create Jira tickets unless `--jira` is passed. They record escalations in the report and a local board file. | Proposed |
 | D14 | Model: pinned in `ultron.toml`, default `claude-sonnet-5-5` for every agent role, and overridable per role. | Proposed |
+| D15 | The user chooses how many dev→test attempts a task gets before it is escalated to Jira: `max_attempts`, default **3** as in the intent, allowed range 1–10 (§3 FR11). This changes the intent's fixed 3. | Confirmed (configurable); default and range proposed |
 
 ---
 
@@ -53,7 +54,7 @@ in_progress → complete | partial | escalated`.
 
 **Task states:**
 `pending (deps unmet) → planning → awaiting_plan_gate → (plan_changes → planning)* → plan_approved → attempt_n
-(coding → testing) → passed → awaiting_result_gate → approved | rejected`, plus `failed` once 3 attempts are used.
+(coding → testing) → passed → awaiting_result_gate → approved | rejected`, plus `failed` once `max_attempts` attempts are used.
 `rejected` and `failed` lead to `escalated`. A task with an escalated dependency becomes `blocked` and is never merged
 on its own.
 
@@ -92,7 +93,15 @@ on its own.
 - **FR9** If an attempt fails, the engine's test output goes back to the developer agent for the next attempt.
 - **FR10** If the developer agent says it needs a different plan, it returns a revised `plan.md`. That plan goes back
   through the plan gate, and the attempt count is kept.
-- **FR11** A task has at most **3 attempts**. Time waiting at the plan gate is not an attempt.
+- **FR11** A task has at most **`max_attempts`** attempts. The user chooses this number:
+  - default **3**, allowed range 1–10;
+  - set per repo in `ultron.toml`;
+  - overridden per requirement with `ultron submit --max-attempts N`, or per evaluation run with
+    `ultron eval --max-attempts N`.
+
+  The engine copies the limit into each task when the task is created and enforces it from there. A later config
+  change doesn't affect tasks already in progress, and an agent can never change it. The limit in force is recorded
+  with the task and shown in `ultron status` (e.g. `attempt 2/5`). Time waiting at the plan gate is not an attempt.
 - **FR12** If the developer agent's diff changes a test file the testing agent wrote, that attempt fails.
 
 **Result gate, escalation, merge and deploy**
@@ -170,7 +179,7 @@ command-line limit. Each role is a prompt template file in `ultron/prompts/<role
 | `<repo>/sdlc/requirements/R<n>-<slug>/` | `intent.md`, `spec.md`, `tasks.md`, `decisions.md`, `tasks/T<k>/plan.md`, `tasks/T<k>/attempt-<a>/{report.md,test-output.txt}` | Yes, on `ultron/R<n>` (D11) |
 | `<repo>/sdlc/releases/v<version>.md` | What each release contains | Yes |
 | `<repo>/.ultron/` | `state.db`, `calls/<id>.jsonl` transcripts, maintain fingerprints | No (gitignored) |
-| `<repo>/ultron.toml` | Test, smoke and deploy commands, log path, caps, model, parallelism, gate modes, Jira project | Yes |
+| `<repo>/ultron.toml` | Test, smoke and deploy commands, log path, caps, `max_attempts`, model, parallelism, gate modes, Jira project | Yes |
 | `C:\git\.ultron-work\<repo>\R<n>\T<k>` | Task worktrees | No |
 | ultron home (default `C:\git\.ultron`) | Eval workspaces, hidden tests, eval reports, totals across repos | No |
 
@@ -211,7 +220,7 @@ command-line limit. Each role is a prompt template file in `ultron/prompts/<role
   stored in files. The project key and board id are in `ultron.toml`. Jira Cloud Free costs ₹0 for up to 10 users.
 - **The engine creates the ticket**, not an agent:
   - summary `[ultron] R<n>/T<k> <title>`;
-  - description with the requirement, the task, acceptance criteria, the reason (3 failed attempts / tester rejection
+  - description with the requirement, the task, acceptance criteria, the reason (all `max_attempts` attempts failed / tester rejection
     with comments / cap hit) and the last test output;
   - attachments: a zip of all attempt logs plus `plan.md`;
   - labels `ultron` and `R<n>`.
@@ -359,12 +368,12 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
 - **Each instance becomes one requirement.** The issue text is its `intent.md`. All gates are set to `auto`.
   Grading follows §7.
 - **Requirement-level metrics:**
-  - pass rate after 1, 2 and 3 attempts;
+  - pass rate after each attempt, 1 to `max_attempts`;
   - shares completed / partial / escalated;
   - how often the spec and plans were sent back (by auto-review in unattended runs; see the concern in §15), and the
     pass rate with vs without send-backs;
   - API-equivalent cost and wall time per requirement.
-- **Task-level metrics:** pass rate after 1, 2 and 3 attempts.
+- **Task-level metrics:** pass rate after each attempt, 1 to `max_attempts`. The report states the limit used.
 - **Baseline:** a single plain `claude -p` run on the same instances, so results compare against a simple baseline
   and not the public leaderboard.
 - **Before the pilot and before the full run,** ultron prints an estimate of usage and duration and waits for
@@ -387,8 +396,8 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
    trains are out of scope.
 5. **`claude -p` behaviour can change** between Claude Code versions. Example: the docs say `--bare` may become the
    default. Mitigation: pin the minimum version, and `ultron doctor` checks the auth source.
-6. **This diverges from the intent.** Jira replaces the CLI or web escalation board (intent §5), and "ticket" becomes
-   "requirement". `intent.md` is left unchanged; this spec records both changes.
+6. **This diverges from the intent.** Jira replaces the CLI or web escalation board (intent §5), "ticket" becomes
+   "requirement", and the fixed 3 attempts become a user-chosen `max_attempts` (default 3). `intent.md` is left unchanged; this spec records these changes.
 
 ## 16. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
@@ -397,7 +406,7 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
 
 ## 17. How V0 is proven (intent §9)
 - **Unit tests** (pytest) cover the engine with a fake `AgentRunner`:
-  - the 3-attempt limit;
+  - the attempt limit (default, per-requirement override, range check, unchanged mid-task);
   - the plan-gate rules;
   - dependency blocking and merge order;
   - caps;

@@ -33,7 +33,7 @@ Run build, lint and test before reporting anything done, and paste the result li
 
 ## What ultron must enforce (from `intent.md`)
 The system enforces these, not the agents:
-- Flow: intent → spec agent → **architect gate** → decomposition (task DAG) → per task, in parallel in isolated worktrees: plan → **plan gate** → up to 3 attempts (code, then tests) → **tester gate** → human merge in dependency order → human deploy (a script) → the maintenance agent files a new `intent.md`.
+- Flow: intent → spec agent → **architect gate** → decomposition (task DAG) → per task, in parallel in isolated worktrees: plan → **plan gate** → up to `max_attempts` attempts (code, then tests; the user chooses the limit, default 3) → **tester gate** → human merge in dependency order → human deploy (a script) → the maintenance agent files a new `intent.md`.
 - A revised plan goes back through the plan gate. Time waiting at a gate isn't an attempt. Failed or rejected tasks become Jira tickets on the escalation board (a Mon–Fri sprint) with all attempt logs.
 - Agents never pass a gate, merge or deploy. The maintenance agent never edits code.
 - Every artifact is a file on disk. Every gate decision records who, when and comments. Every agent call is logged with inputs, outputs, duration and tokens/cost.
