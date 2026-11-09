@@ -22,7 +22,7 @@ the owner should confirm or change it during this review.
 | D5 | Failed tasks go to **Jira** as tickets on a Mon–Fri sprint (§8). This replaces "CLI or minimal web page" for the escalation board in intent §5. Intake stays a file, so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | ultron **proposes each release's version** from the intent, and a person confirms it at the spec gate (§9). Same scheme as social-grid. | Confirmed |
 | D7 | ultron checks before every run that the user is **signed in to a Claude Code account** (§10). | Confirmed |
-| D8 | CLI look: an Ultron-inspired red-and-steel theme with a mascot, a softer red than first proposed, and Claude's orange for agent activity (§11). | Confirmed (theme, mascot); shade proposed |
+| D8 | CLI look: an Ultron red-and-steel theme. The mascot is the owner's Ultron pixel-art head with soft crimson eyes (`#E5484D`). Claude's orange marks agent activity (§11). | Confirmed |
 | D9 | Shape: one **CLI engine outside the agents**. Each requirement's files live in the **target repo**. The evaluation harness and cross-repo totals live in a central **ultron home**. A Claude Code plugin is optional and later. Researched 2026-11-09: a Claude session can't guarantee the gates and attempt limit, but a Python state machine can. | Proposed |
 | D10 | State: **SQLite** (state machine, attempt counters, gate records, agent-call log) plus **files for every artifact**. Answers intent §10 "How task state is stored". | Proposed |
 | D11 | ultron **commits each requirement's artifacts** on its own branches in the target repo. A person merges. | Proposed |
@@ -250,31 +250,57 @@ If any check fails, ultron stops and prints the fix, for example `claude auth lo
 credentials itself.
 
 ## 11. CLI look: palette and mascot
-**Inspiration.** The Ultron character from Marvel: brushed steel with a glowing red core. The mascot, banner and
-icons are **original**. ultron uses no Marvel logos, art or quotes.
+**Mascot.** The owner's choice (2026-11-09): the Ultron pixel-art head from the owner's reference image, redrawn
+cell by cell without the image's watermark. The eyes are soft crimson and always stay red. The source image is not
+committed.
+- **Where it appears:** beside the wordmark in `ultron`, `ultron doctor` and `ultron status`.
+- **Rendering:** with half-block characters, 20 columns by 14 lines. `--quiet`, non-TTY output and `NO_COLOR` hide it.
+- **Grid:** 20 by 28. One row was mirrored to make it symmetric.
 
-**Mascot.** A steel robot head with glowing red eyes and a core gem:
-- it appears beside the wordmark in `ultron`, `ultron doctor` and `ultron status`;
-- its eyes and core show what is happening: **red** when idle, **Claude orange** while an agent is running, **green**
-  after a gate is approved or a merge, and a **dimmed red with a ✖** after an escalation;
-- `--quiet`, a non-TTY output and `NO_COLOR` hide it.
+| Code | Part | Colour |
+|---|---|---|
+| `H` | Head | Steel `#C0C6CC` (on a dark terminal the original black would be invisible) |
+| `C` | Forehead creases | Dim steel `#7A828A` |
+| `E` | Eyes | Soft crimson `#E5484D` |
+| `F` | Mouth and cheek gaps | Dark `#2A2E33` |
+| `.` | Background | Terminal background |
 
 ```
-        ▄▄▄▄▄▄▄▄▄▄▄▄
-      ▄█▀▀        ▀▀█▄       U L T R O N
-     ██   ▄▄▄  ▄▄▄   ██      the loop keeps running
-     ██  ▀███▀▀███▀  ██
-     ██      ◆       ██
-      ▀█▄   ▀▀▀▀   ▄█▀
-        ▀▀█▄▄▄▄█▀▀
+.......HHHHHH.......
+.....HHHHHHHHHH.....
+....HHHHHHHHHHHH....
+...HHHHHHHHHHHHHH...
+..HCHHHHHHHHHHHHCH..
+H.HHCHHHHHHHHHHCHH.H
+H.HHCHHHHHHHHHHCHH.H
+H.HHCHHHHHHHHHHCHH.H
+H.HHCHHHHHHHHHHCHH.H
+H.HHCHHHHHHHHHHCHH.H
+H.HCHHHHHHHHHHHHCH.H
+H.HHHHHHHHHHHHHHHH.H
+HHHEHHHHHHHHHHHHEHHH
+HHHHEEHHHHHHHHEEHHHH
+HHHHEEEEHHHHEEEEHHHH
+HHHHHHEEEHHEEEHHHHHH
+HHHHHHHHCHHCHHHHHHHH
+.HHHHFHHCHHCHHFHHHH.
+.HFHFFFHHHHHHFFFHFH.
+.HFHFFFFHHHHFFFFHFH.
+..HHFFFFHFFHFFFFHH..
+...HHFFFFFFFFFFHH...
+....HFFFHFFHFFFH....
+....HHFFHHHHFFHH....
+.....HHHHHHHHHH.....
+......HHHHHHHH......
+.......HHHHHH.......
+........HHHH........
 ```
 
-**Palette.** The red is softer than the first draft (`#E10600` was too bright). Default **A, soft crimson**, until
-the owner picks from the preview.
+**Palette.** Soft crimson, the owner's choice (2026-11-09). The first draft's `#E10600` was too bright.
 
 | Use | Colour |
 |---|---|
-| Brand, the mascot's eyes and core, headers | Option A, soft crimson: `#E5484D` (glow `#F2777B`). Alternatives: B, light coral `#F06C6C`; C, rose `#E8505B` |
+| Brand, the mascot's eyes, headers | Soft crimson `#E5484D` (lighter `#F2777B` for highlights) |
 | Main text, borders, the mascot's head | Steel `#C0C6CC`, dim steel `#7A828A` |
 | Claude agent activity | Claude orange `#D97757`, with ● |
 | Passed or approved | Green `#3FB950`, with ✔ |

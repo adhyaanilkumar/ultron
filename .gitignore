@@ -1,2 +1,5 @@
 # Reference copy of the playbook; not ours to redistribute.
 *.pdf
+
+# Owner's mascot reference image (third-party, watermarked); the spec holds the redrawn grid.
+ultron-pixel-art-*.webp
