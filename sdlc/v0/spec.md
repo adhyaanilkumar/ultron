@@ -39,6 +39,7 @@ confirm or change it during this review.
 | D16 | Worker model: pinned in `ultron.toml`, default `claude-sonnet-5-5` for every role, and overridable per role. | Proposed |
 | D17 | **Workers talk only through the engine (a broker).** No worker contacts another directly. A worker asks a question with a broker tool, and the engine records it, applies limits, routes it to the right role (any adapter), or asks the human. Worker-facing tools are an agent-neutral MCP interface, so Codex workers can use them too (§11.2). | Confirmed (2026-11-09) |
 | D18 | **Direct peer-to-peer messaging between agents (e.g. the A2A protocol) is a backup**, kept in `sdlc/backlog.md` and used only if brokered messaging proves too limiting. | Confirmed (2026-11-09) |
+| D19 | **V0 is single-user.** One person plays every human role (requester, architect, developer, tester) on their own machine. Team features (team sync, separate people per role, permissions, the multi-project registry) are in `sdlc/backlog.md`. | Confirmed (2026-11-09) |
 
 Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and worker agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
@@ -83,6 +84,9 @@ Workers run in the background between these steps. Closing Claude Code doesn't s
 | Developer | Human | The `plan` gate |
 | Tester | Human | The `result` gate |
 | Developers | Human | Work the escalated Jira tickets |
+
+In V0 every human role above is **the same single user** (D19). The roles are still recorded separately, by gate,
+so that adding real teams later doesn't change the event log.
 | Maintenance agent | Worker | Diagnoses a detected failure and writes `intent.md`. It never edits code or deploys. |
 | The host agent and its model (Claude Code in V0) | Host | Calls ultron's tools for the human. **It never decides a gate.** |
 
