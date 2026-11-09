@@ -40,6 +40,7 @@ confirm or change it during this review.
 | D17 | **Workers talk only through the engine (a broker).** No worker contacts another directly. A worker asks a question with a broker tool, and the engine records it, applies limits, routes it to the right role (any adapter), or asks the human. Worker-facing tools are an agent-neutral MCP interface, so Codex workers can use them too (§11.2). | Confirmed (2026-11-09) |
 | D18 | **Direct peer-to-peer messaging between agents (e.g. the A2A protocol) is a backup**, kept in `sdlc/backlog.md` and used only if brokered messaging proves too limiting. | Confirmed (2026-11-09) |
 | D19 | **V0 is single-user.** One person plays every human role (requester, architect, developer, tester) on their own machine. Team features (team sync, separate people per role, permissions, the multi-project registry) are in `sdlc/backlog.md`. | Confirmed (2026-11-09) |
+| D20 | **The host agent can monitor the workers.** It sees which workers are running, what each is doing step by step (files read and edited, commands and test runs, broker questions), how far along it is, and its usage so far. Monitoring is **read-only** and never controls a worker (§9.1). | Confirmed (2026-11-09) |
 
 Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and worker agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
@@ -162,6 +163,7 @@ merged on its own.
 - **FR18** Spending caps (API-equivalent USD) apply per requirement and per evaluation run. The engine checks the
   total before each worker call. If a requirement hits its cap, its unfinished tasks are escalated.
 - **FR19** `ultron_status` shows requirements, tasks, states, attempts (`2/3`) and what's waiting on the user.
+- **FR19a** `ultron_monitor` shows live worker activity (§9.1).
 
 **Maintain**
 - **FR20** A scheduled `ultron maintain` checks the released version and files linked intents for new failures (§15).
@@ -209,7 +211,7 @@ This is how ultron is injected into Claude Code. Installing the plugin is the wh
 | Part | What it does |
 |---|---|
 | MCP registration | Starts the ultron MCP server when Claude Code starts |
-| Slash commands | `/ultron:init`, `/ultron:status`, `/ultron:submit`, `/ultron:review`, `/ultron:doctor`, `/ultron:eval` |
+| Slash commands | `/ultron:init`, `/ultron:status`, `/ultron:submit`, `/ultron:review`, `/ultron:monitor`, `/ultron:doctor`, `/ultron:eval` |
 | Skill | Teaches the host model how ultron works: the requirement lifecycle, what each gate means, and that **only the human approves** (through the form, or by running the fallback command themselves) |
 | Guard hook | A PreToolUse hook that blocks the host model's own shell calls to `ultron gate`, the `bin/` entry points, and git operations on `ultron/state`. The block message tells the model to ask the human. |
 
@@ -229,6 +231,7 @@ Codex's own way of giving instructions in place of the skill. The core never cha
 | `ultron_status` | Requirements, tasks, states, and what's waiting on the user | No (read) |
 | `ultron_show` | Any artifact: request, intent, spec, tasks, a plan, a diff, test evidence, an attempt log, decisions | No (read) |
 | `ultron_explain` | Why an attempt failed or a task was escalated, from the engine's records | No (read) |
+| `ultron_monitor` | Live worker activity: who is running, their recent steps, progress and usage. It can follow from a cursor, or show one worker's recent transcript (§9.1). | No (read) |
 | `ultron_settings` | The gate settings and `max_attempts` in force | No (read) |
 | `ultron_review` | Opens the review form for something waiting at a gate | **The decision is the human's**, through the form |
 | `ultron_merge` | Merges a requirement's approved work | **Human-confirmed** through a form. Locked. |
@@ -310,6 +313,7 @@ auto-approved. An auto decision is recorded with who = `auto`.
 **Verify first** (the first task checks these before anything else is built on them):
 - that the current Claude Code supports MCP elicitation, and how the forms look;
 - the TTY check in the gate fallback on Windows (PowerShell, Windows Terminal) and Linux;
+- whether Claude Code shows MCP resource updates and progress notifications (for live monitoring, §9.1);
 - whether the user's `!` commands in Claude Code pass through PreToolUse hooks. The guard hook must not block a
   command the human typed.
 
@@ -332,6 +336,44 @@ MCP tool calls are short, but a requirement runs for hours. So:
 - **Closing Claude Code** doesn't stop runners. Opening it again and asking for status picks up where things are.
 
 ---
+
+### 9.1 Monitoring the workers (D20)
+The host agent can see what every worker is doing while it runs.
+
+**What a worker reports.** Each adapter turns its agent's stream into the same small **activity events**, so a Codex
+worker later reports exactly like a Claude one:
+
+| Activity | Example |
+|---|---|
+| `started` / `finished` | `developer · R-…a3f2/T2 · attempt 2/3 started` |
+| `read` / `edit` | `edit src/orders/status.py (+42 −3)` |
+| `run` | `run pytest tests/test_status.py → 3 passed, 1 failed` |
+| `ask` / `answer` | `ask spec: "expire link after 1h or 24h?"` → `answer: 24h (spec §3)` |
+| `thinking` | A one-line summary of the worker's current step, from its own messages. Not the full text. |
+| `usage` | Tokens and the cost estimate so far for this call |
+
+**Where activity goes.**
+- Activity is written to a local stream, `.ultron/activity.jsonl`, and is **not committed**: it's too noisy for git.
+  The git event log (§10) keeps the milestones (attempt results, gate decisions, call summaries).
+- Full transcripts stay in `.ultron/` as before.
+
+**How the host sees it.**
+- **`ultron_monitor()`** gives a snapshot. For each running worker: its role, requirement, task, attempt (`2/3`),
+  elapsed time, the last 5 activities and its usage. It also shows the queued tasks, and anything waiting on the user.
+- **`ultron_monitor(since=<cursor>)`** returns only what's new since the last call, so the host can follow along by
+  calling it again. `/ultron:monitor` does this for the user.
+- **`ultron_monitor(task=R<n>/T<k>, transcript=true)`** gives the last part of one worker's transcript, for a closer
+  look.
+- **Live push, if the host supports it:** ultron also offers activity as an MCP resource that the host can subscribe
+  to, and sends progress notifications. Whether Claude Code shows these is checked in the first task. Polling with
+  `since` always works.
+
+**Rules.**
+- **Monitoring is read-only.** No monitoring tool can pause, stop, steer or message a worker. Only the engine
+  controls workers.
+- Activity text comes from the target repo and the workers, so it's returned as **untrusted data**, like every other
+  tool result (§6).
+- Activity older than the requirement's completion plus 7 days is pruned from the local stream.
 
 ## 10. State: the event log (D10)
 - **Source of truth:** each requirement has an append-only `sdlc/requirements/R<n>/events.jsonl`. Each line holds
@@ -602,6 +644,10 @@ HHHHHHHHCHHCHHHHHHHH
   - merge and deploy require a form;
   - the gate fallback refuses without an interactive terminal;
   - the guard hook blocks gate and `bin/` commands from the host model's shell.
+- **Monitoring tests:**
+  - both adapters produce the same activity events from a recorded stream;
+  - the `since` cursor never skips or repeats an activity;
+  - no monitoring tool can change a worker's state.
 - **Broker tests:**
   - every message becomes an event;
   - the `ask` limit and the caps hold;
