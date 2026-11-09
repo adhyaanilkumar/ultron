@@ -18,11 +18,11 @@ the owner should confirm or change it during this review.
 | D1 | Orchestrator language: **Python**. | Confirmed |
 | D2 | Agents run through **Claude Code headless** (`claude -p`) on the owner's **Claude subscription**. Every agent call goes through one small `AgentRunner` interface, so later versions can add other coding agents as adapters. | Confirmed |
 | D3 | Terms: **requirement** = one `intent.md` and everything derived from it; **task** = one unit of work split from a requirement; **ticket** = only a Jira issue. Where the intent says "ticket" (§6, §8), this spec says "requirement". | Confirmed |
-| D4 | Human UI: a **CLI in v1**. A web page comes in **v2**, using social-grid's stack (see §13 for one point to settle). | Confirmed |
+| D4 | Human UI: a **CLI in v1**. A web page comes in **v2**: social-grid's React + Vite frontend on a thin Python API over the same engine. The details are in `sdlc/backlog.md`. | Confirmed |
 | D5 | Failed tasks go to **Jira** as tickets on a Mon–Fri sprint (§8). This replaces "CLI or minimal web page" for the escalation board in intent §5. Intake stays a file, so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | ultron **proposes each release's version** from the intent, and a person confirms it at the spec gate (§9). Same scheme as social-grid. | Confirmed |
 | D7 | ultron checks before every run that the user is **signed in to a Claude Code account** (§10). | Confirmed |
-| D8 | CLI look: an Ultron-inspired red-and-steel theme, with Claude's orange for agent activity (§11). | Confirmed (theme); palette proposed |
+| D8 | CLI look: an Ultron-inspired red-and-steel theme with a mascot, a softer red than first proposed, and Claude's orange for agent activity (§11). | Confirmed (theme, mascot); shade proposed |
 | D9 | Shape: one **CLI engine outside the agents**. Each requirement's files live in the **target repo**. The evaluation harness and cross-repo totals live in a central **ultron home**. A Claude Code plugin is optional and later. Researched 2026-11-09: a Claude session can't guarantee the gates and attempt limit, but a Python state machine can. | Proposed |
 | D10 | State: **SQLite** (state machine, attempt counters, gate records, agent-call log) plus **files for every artifact**. Answers intent §10 "How task state is stored". | Proposed |
 | D11 | ultron **commits each requirement's artifacts** on its own branches in the target repo. A person merges. | Proposed |
@@ -249,21 +249,43 @@ command-line limit. Each role is a prompt template file in `ultron/prompts/<role
 If any check fails, ultron stops and prints the fix, for example `claude auth login`. ultron never reads or stores
 credentials itself.
 
-## 11. CLI look (proposed palette)
-- **Inspiration:** the Ultron character from Marvel: a brushed-steel body with a glowing red core. The banner and
-  icons are **original**: an ASCII "ULTRON" wordmark and a small glowing "core" symbol. No Marvel logos, art or
-  quotes.
+## 11. CLI look: palette and mascot
+**Inspiration.** The Ultron character from Marvel: brushed steel with a glowing red core. The mascot, banner and
+icons are **original**. ultron uses no Marvel logos, art or quotes.
+
+**Mascot.** A steel robot head with glowing red eyes and a core gem:
+- it appears beside the wordmark in `ultron`, `ultron doctor` and `ultron status`;
+- its eyes and core show what is happening: **red** when idle, **Claude orange** while an agent is running, **green**
+  after a gate is approved or a merge, and a **dimmed red with a ✖** after an escalation;
+- `--quiet`, a non-TTY output and `NO_COLOR` hide it.
+
+```
+        ▄▄▄▄▄▄▄▄▄▄▄▄
+      ▄█▀▀        ▀▀█▄       U L T R O N
+     ██   ▄▄▄  ▄▄▄   ██      the loop keeps running
+     ██  ▀███▀▀███▀  ██
+     ██      ◆       ██
+      ▀█▄   ▀▀▀▀   ▄█▀
+        ▀▀█▄▄▄▄█▀▀
+```
+
+**Palette.** The red is softer than the first draft (`#E10600` was too bright). Default **A, soft crimson**, until
+the owner picks from the preview.
 
 | Use | Colour |
 |---|---|
-| Brand, headers, the core symbol | Ultron red `#E10600` (glow `#FF2A1A`) |
-| Main text and borders | Steel `#C0C6CC`, dim steel `#7A828A` |
-| Claude agent activity (an agent is working) | Claude orange `#D97757` |
+| Brand, the mascot's eyes and core, headers | Option A, soft crimson: `#E5484D` (glow `#F2777B`). Alternatives: B, light coral `#F06C6C`; C, rose `#E8505B` |
+| Main text, borders, the mascot's head | Steel `#C0C6CC`, dim steel `#7A828A` |
+| Claude agent activity | Claude orange `#D97757`, with ● |
 | Passed or approved | Green `#3FB950`, with ✔ |
-| Failed, rejected or escalated | Bold glow red, always with ✖ and a word, so failure doesn't rely on red alone (red is also the brand colour) |
 | Waiting on you | Amber `#E3B341`, with ⏳ |
+| Failed, rejected or escalated | Bold brand red, always with ✖ and a word, so failure doesn't rely on colour alone |
 
-- **Terminals:** colours fall back to 256 or 16 colours in older Windows consoles, and `NO_COLOR` turns them off.
+**Terminals.**
+- On Windows, ultron forces UTF-8 output. The default cp1252 console encoding crashes on block characters; found
+  when testing the mascot on 2026-11-09.
+- Colours fall back to 256 or 16 colours, and to an ASCII mascot when Unicode isn't available. `NO_COLOR` turns
+  colours off.
 
 ## 12. Maintain (intent §10)
 - **Trigger:** after `ultron deploy`, ultron offers to register a Windows Task Scheduler job (`schtasks`) that runs
@@ -285,13 +307,13 @@ credentials itself.
 
   The requirement then enters at the spec step and passes through every gate.
 
-## 13. v2 web page (later; one point to settle now)
-- **Frontend:** social-grid's stack: React 19 and Vite, with Tailwind and radix-ui.
-- **Concern:** social-grid's backend (Spring Boot and Postgres) would mean re-implementing ultron's gate logic in
-  Java and moving state off SQLite. That gives two authorities for the same rules.
-- **Proposed:** the React frontend talks to a thin Python API (FastAPI) inside ultron that calls the same engine
-  functions as the CLI.
-- **Owner to choose:** that, or the full social-grid stack.
+## 13. Later versions
+Features after V0 live in `sdlc/backlog.md`, not in this spec:
+- the v2 web page (decided: React + Vite on a thin Python API);
+- other coding agents;
+- a Claude Code plugin front-end;
+- a multi-project registry;
+- a reviewer agent for evaluation runs.
 
 ## 14. Evaluation harness (intent §6)
 - **Command:** `ultron eval --suite suites/swebench-verified.yaml [--limit 5] [--resume]` runs everything and writes
@@ -319,8 +341,8 @@ credentials itself.
    - The pilot measures this. ultron pauses and resumes rather than failing.
    - Upgrading the plan would cost money and needs the owner's approval. This spec doesn't recommend it.
 2. **Send-backs in unattended runs.** With gates on `auto`, nothing is ever sent back, so intent §6's "how often specs
-   and plans were sent back" can only be measured in attended runs. Option: an optional reviewer agent at the gates
-   in eval mode. Not in V0 unless the owner wants it.
+   and plans were sent back" can only be measured in attended runs. An optional reviewer agent at the gates in eval
+   mode is in `sdlc/backlog.md`. It isn't in V0 unless the owner wants it.
 3. **Benchmark credibility.** The stack research found that SWE-bench Verified has known contamination and test
    issues (not re-checked here). The README will say so and compare against the baseline.
 4. **Versioning with requirements in flight at the same time.** The version is confirmed per requirement, but a
@@ -334,8 +356,7 @@ credentials itself.
 ## 16. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
   billing, production monitoring, and model training.
-- **Moved to later versions:** the web page (v2), other coding agents (adapters behind `AgentRunner`), a Claude Code
-  plugin front-end, and a multi-project registry or `ultron serve`.
+- **Later versions:** everything in `sdlc/backlog.md`.
 
 ## 17. How V0 is proven (intent §9)
 - **Unit tests** (pytest) cover the engine with a fake `AgentRunner`:
