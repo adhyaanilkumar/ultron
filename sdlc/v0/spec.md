@@ -19,18 +19,19 @@ the owner should confirm or change it during this review.
 | D2 | Agents run through **Claude Code headless** (`claude -p`) on the owner's **Claude subscription**. Every agent call goes through one small `AgentRunner` interface, so later versions can add other coding agents as adapters. | Confirmed |
 | D3 | Terms: **requirement** = one `intent.md` and everything derived from it; **task** = one unit of work split from a requirement; **ticket** = only a Jira issue. Where the intent says "ticket" (§6, §8), this spec says "requirement". | Confirmed |
 | D4 | Human UI: a **CLI in v1**. A web page comes in **v2**: social-grid's React + Vite frontend on a thin Python API over the same engine. The details are in `sdlc/backlog.md`. | Confirmed |
-| D5 | Failed tasks go to **Jira** as tickets on a Mon–Fri sprint (§8). This replaces "CLI or minimal web page" for the escalation board in intent §5. Intake stays a file, so intent §7 still holds. | Confirmed (Jira); details proposed |
+| D5 | Failed tasks go to **Jira** as tickets on a Mon–Fri sprint (§8). This replaces "CLI or minimal web page" for the escalation board in intent §5. Intake stays local (a file or text, never Jira), so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | ultron **proposes each release's version** from the intent, and a person confirms it at the spec gate (§9). Same scheme as social-grid. | Confirmed |
 | D7 | ultron checks before every run that the user is **signed in to a Claude Code account** (§10). | Confirmed |
 | D8 | CLI look: the owner's Ultron pixel-art head, full size (20×28, 14 terminal lines), in dark gunmetal steel `#7A828A` with `#941212` eyes. The wordmark is crimson `#E5484D`. Other CLI text uses the owner's palette. Claude's orange marks agent activity (§11). | Confirmed |
 | D9 | Shape: one **CLI engine outside the agents**. Each requirement's files live in the **target repo**. The evaluation harness and cross-repo totals live in a central **ultron home**. A Claude Code plugin is optional and later. Researched 2026-11-09: a Claude session can't guarantee the gates and attempt limit, but a Python state machine can. | Proposed |
-| D10 | State: **SQLite** (state machine, attempt counters, gate records, agent-call log) plus **files for every artifact**. Answers intent §10 "How task state is stored". | Proposed |
-| D11 | ultron **commits each requirement's artifacts** on its own branches in the target repo. A person merges. | Proposed |
+| D10 | State: an append-only **event log committed to git** is the source of truth. SQLite is a local cache rebuilt from it. Every artifact is a file (§5). V0 is single-user, and team sync goes in `sdlc/backlog.md`. Answers intent §10 "How task state is stored". | Confirmed (2026-11-09) |
+| D11 | ultron **commits each requirement's artifacts and event log** to an `ultron/state` branch in the target repo. `ultron merge` brings a requirement's folder into the target branch with its code. A person merges. | Proposed |
 | D12 | Evaluation set: **SWE-bench Verified, sympy (75) and pytest (19) issues**. Start with a **5-requirement pilot** to measure real usage, then ask before the full run. | Proposed |
 | D13 | Evaluation runs don't create Jira tickets unless `--jira` is passed. They record escalations in the report and a local board file. | Proposed |
 | D14 | Model: pinned in `ultron.toml`, default `claude-sonnet-5-5` for every agent role, and overridable per role. | Proposed |
 | D15 | The user chooses how many dev→test attempts a task gets before it is escalated to Jira: `max_attempts`, default **3** as in the intent, allowed range 1–10 (§3 FR11). This changes the intent's fixed 3. | Confirmed (configurable); default and range proposed |
 | D16 | The user chooses which approvals are human and which are automatic, and can add extra human gates (`tasks`, `escalation`, `maintain`). `merge` and `deploy` stay human (§6). | Confirmed (feature); gate list, defaults and locks proposed |
+| D17 | **Hybrid intake.** `ultron submit` takes a template `intent.md` (used as-is) or free text in the user's own words. Free text goes to a small intake agent, which drafts `intent.md` and asks clarifying questions, and a new `intent` gate approves the draft (FR2). Researched 2026-11-09. | Confirmed (2026-11-09) |
 
 ---
 
@@ -38,7 +39,8 @@ the owner should confirm or change it during this review.
 
 | Actor | Type | In ultron |
 |---|---|---|
-| Requester | Human | Writes `intent.md` and runs `ultron submit` |
+| Requester | Human | Writes `intent.md` or describes the need in their own words, runs `ultron submit`, and approves an intake draft at the `intent` gate |
+| Intake agent | Agent | Turns free text into `intent.md`, asks clarifying questions, adds no scope. It has no tools and no codebase access. |
 | Spec agent | Agent | Writes `spec.md` and proposes the version |
 | Architect | Human | Spec gate: `ultron gate spec` |
 | Decomposition agent | Agent | Writes `tasks.md` plus a machine-readable `tasks.json` (the DAG) |
@@ -50,8 +52,8 @@ the owner should confirm or change it during this review.
 | Maintenance agent | Agent | Diagnoses a detected failure and writes a new `intent.md`. It never edits code or deploys. |
 
 **Requirement states** (only the engine changes them):
-`submitted → spec_drafting → awaiting_spec_gate → (changes_requested → spec_drafting)* → spec_approved → decomposing →
-in_progress → complete | partial | escalated`.
+`submitted → [intake_drafting → awaiting_intent_gate →] spec_drafting → awaiting_spec_gate → (changes_requested → spec_drafting)* → spec_approved → decomposing →
+in_progress → complete | partial | escalated`. The bracketed intake steps happen only for free-text submissions (FR2).
 
 **Task states:**
 `pending (deps unmet) → planning → awaiting_plan_gate → (plan_changes → planning)* → plan_approved → attempt_n
@@ -66,8 +68,30 @@ on its own.
 **Intake and spec**
 - **FR1** `ultron init --repo <path>` prepares a target repo: it writes `ultron.toml`, adds `.ultron/` to `.gitignore`
   and creates `sdlc/`.
-- **FR2** `ultron submit <intent.md> --repo <path>` registers a requirement as `R<n>-<slug>`. It copies the intent to
-  `sdlc/requirements/R<n>-<slug>/intent.md` and starts the spec agent.
+- **FR2** Intake. `ultron submit [<file> | --text "..." | -] --repo <path>` registers a requirement.
+  - **Ids:** each requirement gets a collision-free id, `R-<yyyymmdd>-<4 hex>` (e.g. `R-20261109-a3f2`), so team sync
+    can come later without renaming anything. This spec writes `R<n>` for short.
+  - **What's stored:** the submission is saved byte for byte as `sdlc/requirements/R<n>/request.md`.
+  - **FR2a Template check (no AI):** a parser checks for the five template headings (Problem, Proposed outcome,
+    Affected users and systems, Constraints, Open questions). If they are all there, the file becomes `intent.md`
+    unchanged and the spec agent starts.
+  - **FR2b Intake agent:** for free text, or a file that fails the check:
+    - It drafts `intent.md` in the template, reusing the user's own phrases.
+    - It asks at most 5 clarifying questions in the CLI.
+    - It must not add scope. Anything inferred is labelled "Assumption:", and anything unresolved goes under Open
+      questions.
+    - It has no tools and no codebase access; the spec agent reads the code later.
+    - Input in another language (e.g. Hindi or Hindi–English) produces an English `intent.md` that quotes the original
+      lines. Unclear translations go to Open questions.
+    - The questions, answers, model and usage are saved in `intake.json`.
+  - **FR2c Intent gate:** this happens only when the intake agent wrote the intent.
+    `ultron show intent R<n>` shows `request.md` and `intent.md` side by side. Then
+    `ultron gate intent R<n> approve|changes -m ...`. Changes rerun the intake agent with the comments.
+    - The engine records two playbook measures: time to intent, and whether the draft was approved with no changes
+      (survival rate).
+  - **Machine-written intents skip the intake agent:**
+    - Maintenance-agent intents (§12) go through the template check only, and then the `maintain` gate.
+    - Evaluation issues use the raw issue text as `intent.md`, with no intake (§14).
 - **FR3** The spec agent reads the intent and the target codebase (read-only tools) and writes `spec.md`. The spec
   contains requirements, design, acceptance criteria, flagged concerns, and a **proposed version bump with its reason**
   (§9).
@@ -109,19 +133,21 @@ on its own.
 - **FR13** A task that passes goes to the result gate. `ultron show result R<n>/T<k>` shows the plan, the test
   evidence and the diff (in the terminal, or in VS Code with `--open`). Then
   `ultron gate result R<n>/T<k> approve|reject -m ...`.
-- **FR14** A task that fails 3 times, or is rejected by the tester, is escalated to Jira (§8).
+- **FR14** A task that uses all `max_attempts` attempts without passing, or is rejected by the tester, is escalated to
+  Jira (§8).
 - **FR15** `ultron merge R<n>` is run by a person. It merges the approved task branches into the target branch in
   dependency order, skips any task whose dependency is escalated, and stops on a conflict.
 - **FR16** `ultron deploy --repo <path>` is run by a person. It runs the configured deploy script, then records the
   release: version, commit, time, who, and the requirements and tasks it contains. It also tags `v<version>`.
 
 **Records and logs**
-- **FR17** Every gate decision records who (git `user.name`), when, the decision and the comments. Records are kept
-  in SQLite and appended to `sdlc/requirements/R<n>-<slug>/decisions.md`.
+- **FR17** Every gate decision is an event in the requirement's event log (§5): who (git `user.name` and email, or
+  `auto`), when, the decision and the comments. `decisions.md` is generated from the log for people to read.
 - **FR18** Every agent call is logged with:
   - role, requirement and task, and attempt;
   - the prompt (input) and the final result (output);
-  - the raw transcript (stream-json);
+  - the raw transcript (stream-json), kept locally in `.ultron/calls/` because it's too large for git; the event log
+    keeps a summary of every call;
   - duration, tokens (input, output and cache), `total_cost_usd` (recorded as an API-equivalent estimate) and stop
     reason.
 - **FR19** Spending caps (API-equivalent USD) apply per requirement and per evaluation run. The engine checks the
@@ -141,15 +167,15 @@ on its own.
     WebFetch, WebSearch, `git push`, `git merge`, `git rebase`, `git checkout` of other branches, and edits under
     `.ultron/` and `sdlc/`.
   - The engine also checks each diff afterwards.
-- **NFR2** Every artifact is a readable file: `intent.md`, `spec.md`, `tasks.md`, `plan.md`, test reports, attempt logs,
-  `decisions.md`.
+- **NFR2** Every artifact is a readable file: `request.md`, `intent.md`, `spec.md`, `tasks.md`, `plan.md`, test reports,
+  attempt logs, `decisions.md`, and the event log `events.jsonl`.
 - **NFR3** Works against any local git repo on Windows 11 (PowerShell and Git Bash) and Linux. Work folders must have
   no spaces in their path (default `C:\git\.ultron-work`).
 - **NFR4** Untrusted target repos can't steer the agents. ultron doesn't load the target repo's `.claude/` hooks,
   settings or `.mcp.json` into agent calls. It passes its own settings instead. The exact flags are verified in the
   agent-layer task.
-- **NFR5** A run can be resumed. If ultron is stopped, or a usage limit is hit, `ultron resume` continues from SQLite
-  state. A rate limit pauses the run and doesn't count as a failed attempt.
+- **NFR5** A run can be resumed. If ultron is stopped, or a usage limit is hit, `ultron resume` continues from the
+  event log. A rate limit pauses the run and doesn't count as a failed attempt.
 - **NFR6** Simple enough for one person to build and explain. No server, queue or container is needed for the core
   pipeline. Docker is needed only for evaluation grading.
 
@@ -160,9 +186,10 @@ on its own.
 ```
 ultron (CLI, Typer + Rich)
  ├─ engine/      state machine, scheduler (asyncio + semaphore), attempt limit, caps, gates  ← the authority
+ ├─ intake/      template check + intake agent flow
  ├─ agents/      AgentRunner protocol; ClaudeCodeRunner (claude -p subprocess); prompts per role; JSON schemas
  ├─ git/         worktrees, branches, merges, diffs (shells out to git)
- ├─ store/       SQLite (WAL) + artifact writer
+ ├─ store/       event log (source of truth) + SQLite cache + artifact writer
  ├─ jira/        escalation client (REST)
  ├─ maintain/    checks, log reader, fingerprints, intent writer
  └─ eval/        dataset prep, run, grade (swebench on Docker), report
@@ -173,15 +200,28 @@ ultron (CLI, Typer + Rich)
 cost_usd, duration_ms, transcript_path, stop_reason)`. The prompt goes in on stdin, which avoids Windows' 32 KB
 command-line limit. Each role is a prompt template file in `ultron/prompts/<role>.md`, versioned with the code.
 
+**State: the event log (decided 2026-11-09)**
+- **Source of truth:** each requirement has an append-only log, `sdlc/requirements/R<n>/events.jsonl`. Each line is
+  one event: `seq`, time, actor (a git user, `auto`, `engine`, or an agent role), type, requirement, task, attempt,
+  and data. Examples: `gate.decided`, `attempt.finished`, `task.escalated`, `agent.call` with a usage summary,
+  `config.snapshot` with `max_attempts` and the gate settings.
+- **The cache:** SQLite (`.ultron/state.db`) is only a cache for fast queries and reports. ultron checks it against
+  the log's latest commit on start, and rebuilds it if it's stale or missing.
+- **Writing:** the engine writes an event and the files it refers to in **one commit** to the `ultron/state` branch,
+  through a dedicated worktree. State and artifacts can't drift apart, and the commit history is the audit trail.
+- **V0 is single-user.** Nothing is pushed or pulled automatically. Team sync (pull before / push after, task claims,
+  retry on a rejected push) is in `sdlc/backlog.md`. It works on this same log without changing its format.
+
 **Where things live**
 
 | Location | Contents | In git? |
 |---|---|---|
-| `<repo>/sdlc/requirements/R<n>-<slug>/` | `intent.md`, `spec.md`, `tasks.md`, `decisions.md`, `tasks/T<k>/plan.md`, `tasks/T<k>/attempt-<a>/{report.md,test-output.txt}` | Yes, on `ultron/R<n>` (D11) |
+| `<repo>/sdlc/requirements/R<n>/` | `request.md`, `intent.md`, `intake.json`, `events.jsonl`, `spec.md`, `tasks.md`, `decisions.md`, `tasks/T<k>/plan.md`, `tasks/T<k>/attempt-<a>/{report.md,test-output.txt}` | Yes, on `ultron/state`; brought into the target branch by `ultron merge` (D11) |
 | `<repo>/sdlc/releases/v<version>.md` | What each release contains | Yes |
-| `<repo>/.ultron/` | `state.db`, `calls/<id>.jsonl` transcripts, maintain fingerprints | No (gitignored) |
+| `<repo>/.ultron/` | `state.db` (cache), `calls/<id>.jsonl` transcripts, the log-file read offset for maintain | No (gitignored) |
 | `<repo>/ultron.toml` | Test, smoke and deploy commands, log path, caps, `max_attempts`, model, parallelism, gate modes, Jira project | Yes |
 | `C:\git\.ultron-work\<repo>\R<n>\T<k>` | Task worktrees | No |
+| `C:\git\.ultron-work\<repo>\_state` | Worktree of the `ultron/state` branch, where the engine commits | No |
 | ultron home (default `C:\git\.ultron`) | Eval workspaces, hidden tests, eval reports, totals across repos | No |
 
 **Stack** (from the 2026-11-09 research; versions are re-checked when the project is set up)
@@ -192,7 +232,7 @@ command-line limit. Each role is a prompt template file in `ultron/prompts/<role
 | CLI | Typer and Rich |
 | Concurrency | asyncio, with `create_subprocess_exec` and a semaphore |
 | Git | Shell out to `git` (worktree, merge, diff) |
-| State | stdlib `sqlite3` (WAL, `BEGIN IMMEDIATE`) |
+| State | JSON-lines event log in git; stdlib `sqlite3` as the cache |
 | Config | `ultron.toml` read by `tomllib` and validated with pydantic |
 | Jira | Jira Cloud REST v3 and Agile API through `httpx` |
 | Evaluation grading | `swebench` harness on Docker Desktop (WSL2) |
@@ -206,6 +246,7 @@ can also add human approvals the intent doesn't have.
 
 | Gate | What gets approved | Default | Can be changed? |
 |---|---|---|---|
+| `intent` | An `intent.md` the intake agent drafted from free text (FR2c). Not used for template files. | human | yes |
 | `spec` | `spec.md` and the proposed version (architect) | human | yes |
 | `tasks` | `tasks.md`, the task split and its dependencies | auto | yes (an extra human gate) |
 | `plan` | Each task's `plan.md` (developer) | human | yes |
@@ -219,6 +260,7 @@ can also add human approvals the intent doesn't have.
 (intent §5). Unlocking them would change the intent, so it needs the owner's explicit decision. See §15.
 
 **What `auto` means.** The engine passes the gate as soon as that stage's own checks pass:
+- `intent`: the draft passes the template check.
 - `spec` and `tasks`: the output is valid against its schema. For `tasks`, the graph also has no cycles.
 - `plan`: `plan.md` has all four sections.
 - `result`: the engine's own test run passed. A failing task is never auto-approved; it uses up its attempts.
@@ -237,7 +279,7 @@ An `auto` decision is recorded like a human one, with who = `auto`, in SQLite an
 - **Snapshot:** a requirement takes a snapshot of its gate settings when it's submitted, as with `max_attempts`.
 - **Mid-run changes:** `ultron gates set R<n> plan=human` changes a running requirement, but only for gates it hasn't
   reached yet. The change is recorded in `decisions.md`.
-- **Warning:** switching a default-human gate (`spec`, `plan`, `result`) to `auto` prints a one-line warning and is
+- **Warning:** switching a default-human gate (`intent`, `spec`, `plan`, `result`) to `auto` prints a one-line warning and is
   recorded.
 - **Agents:** no agent can read or change gate settings.
 - **Evaluation:** every evaluation report lists the gate settings used for the run (intent §6).
@@ -403,8 +445,12 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
 - **Command:** `ultron eval --suite suites/swebench-verified.yaml [--limit 5] [--resume]` runs everything and writes
   `report.md` and `report.json` under the ultron home. Results can be reproduced from this one command plus the
   pinned model and Claude Code version.
-- **Each instance becomes one requirement.** The issue text is its `intent.md`. All gates are set to `auto`.
-  Grading follows §7.
+- **Each instance becomes one requirement.** The raw issue text is its `intent.md`, with no intake agent (intent §6).
+  All changeable gates are `auto`. Grading follows §7.
+- **Optional intake comparison:** `--intake auto` runs a second, labelled arm. The intake agent runs in no-questions
+  mode, and anything unclear goes to Open questions. The report compares both arms against the baseline, which
+  answers "does structuring the intake raise the pass rate?". Intake outputs are saved so the arm can be
+  reproduced.
 - **Requirement-level metrics:**
   - pass rate after each attempt, 1 to `max_attempts`;
   - shares completed / partial / escalated;
@@ -439,6 +485,10 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
 7. **Locked merge and deploy gates (§6).** The intent requires a human action for both, so V0 doesn't let them be
    switched to `auto`. If the owner wants automatic merging in a later version, it goes in `sdlc/backlog.md` and changes
    the intent.
+8. **Intake in other languages is untested.** Claude handles Hindi well, but there's no evidence specific to
+   requirements. Test intake with 2–3 Hindi or Hindi–English sample requests before relying on it.
+9. **Event log commits.** Every engine step commits to `ultron/state`, which makes many small commits. That's
+   intended, as the audit trail. A requirement's history can be squashed when it's merged, if the owner wants.
 
 ## 16. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
@@ -454,7 +504,9 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
   - auto-gate recording;
   - fingerprint dedup;
   - version bumps;
-  - the doctor checks.
+  - the doctor checks;
+  - the template check and the intake flow (with a fake agent);
+  - rebuilding the cache from the event log, which must give the same state as before.
 - **Integration test:** run the real pipeline against `samples/sample-app`, a small Python app with tests that ultron
   copies to the work folder.
 - **The demo** (intent §9 bullet 1):

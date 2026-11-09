@@ -30,3 +30,15 @@ A list of target repos in the ultron home, with totals across repos, and `ultron
 ## Reviewer agent at the gates in evaluation runs
 An optional agent that reviews specs and plans when the gates are on `auto`. That would make the send-back
 statistics measurable in unattended runs (spec §15.2).
+
+## Team sync (multiple people on one repo)
+Decided 2026-11-09: V0 already keeps state as a git-committed event log (spec §5, D10). This feature adds sharing:
+- **Sync:** every ultron command pulls `ultron/state` before acting and pushes after writing an event.
+- **Collisions:** a rejected push (someone pushed first) means pull, recheck, and retry. A git push to one branch is
+  atomic, so this works as an optimistic lock without a server.
+- **Task claims:** `task.claimed` events, with an expiry, so two people never run the same task. Agent calls run on the
+  claimer's machine with their own Claude login.
+- **Agent transcripts** stay local. Only call summaries are shared.
+
+Alternative for later: a central `ultron serve` with Postgres, combined with the v2 web page, for live multi-user use.
+
