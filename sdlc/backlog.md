@@ -25,10 +25,10 @@ Codex matters in two separate ways, and they can come separately:
 
   The core doesn't change. Check whether Codex shows MCP elicitation forms. If it doesn't, approvals use the
   terminal fallback.
-- **As a worker (ultron running Codex for a role):**
+- **As an ultron agent (ultron running Codex for a role):**
   - add a new `AgentRunner` adapter that runs `codex exec` non-interactively in the task worktree;
-  - give it the broker's worker tools through its MCP config, so it talks to other workers the same way Claude
-    workers do (spec §11.2);
+  - give it the broker's ultron agent tools through its MCP config, so it talks to other ultron agents the same way
+    Claude-based ones do (spec §11.2);
   - choose it per role in `ultron.toml`.
 
 Verify Codex's current non-interactive and MCP options when this is planned.

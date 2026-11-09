@@ -6,7 +6,7 @@ ultron is **not a standalone application**. It's **injected into coding agents**
 host agent (a plugin with slash commands, a skill and a guard hook). The user works inside the coding agent they
 already use, which is Claude Code in V0:
 1. The user describes a requirement in the host agent.
-2. ultron's own worker agents turn it into a spec, tasks and plans, then code and test each task.
+2. the ultron agents (ultron's own agents) turn it into a spec, tasks and plans, then code and test each task.
 3. The human approves at the gates through forms in the host agent, and merges and deploys.
 4. After a release, a maintenance check turns new failures into new requirements.
 
@@ -23,26 +23,26 @@ confirm or change it during this review.
 |---|---|---|
 | D1 | Language: **Python**. | Confirmed |
 | D2 | **ultron is injected into coding agents, not a standalone app.** Its core is an MCP server, packaged for each host agent with a plugin, slash commands, a skill and a guard hook. V0 targets Claude Code, and other hosts (Codex first) are later packages. Every user-facing action is a tool or slash command inside the host. The only executables outside the host are background processes the user never opens directly: the runner, scheduled maintenance, and the terminal-only approval fallback (§5). | Confirmed (2026-11-09) |
-| D3 | **Worker agents are ultron's choice, made in config.** ultron runs its own worker agents (intake, spec, decomposition, developer, testing, maintenance) behind one `AgentRunner` interface. The V0 adapter is **Anthropic's Claude Agent SDK** (Python) on the user's Claude subscription. `claude -p` is the fallback adapter if the SDK can't use the subscription. Codex and other agents are later adapters, chosen per role in `ultron.toml` (§11). | Confirmed (2026-11-09) |
+| D3 | **ultron agents are ultron's choice, made in config.** ultron runs its own agents, called **ultron agents** (intake, spec, decomposition, developer, testing, maintenance) behind one `AgentRunner` interface. The V0 adapter is **Anthropic's Claude Agent SDK** (Python) on the user's Claude subscription. `claude -p` is the fallback adapter if the SDK can't use the subscription. Codex and other agents are later adapters, chosen per role in `ultron.toml` (§11). | Confirmed (2026-11-09) |
 | D4 | Terms: **requirement** = one `intent.md` and everything derived from it; **task** = one unit of work split from a requirement; **ticket** = only a Jira issue. Where the intent says "ticket" (§6, §8), this spec says "requirement". | Confirmed |
 | D5 | Failed tasks become **Jira tickets** on a Mon–Fri sprint (§12). This replaces the intent's CLI or web escalation board. Intake stays local, never through Jira, so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | **Hybrid intake.** The user writes a template `intent.md` or just describes the need. Free text goes to the intake agent, and the draft is approved at the `intent` gate (§7.1). | Confirmed |
 | D7 | **The user chooses** which approvals are human or automatic, and the dev→test attempt limit (`max_attempts`, default 3). `merge` and `deploy` are always human (§8). | Confirmed (feature); defaults, range and locks proposed |
 | D8 | **Approvals come from the human, never the model.** The preferred channel is an MCP **elicitation** form that the host shows to the human. The model can't fill it in. The fallback is the `ultron gate` command, which needs an interactive terminal and typed confirmation. The guard hook also blocks the host model from running it (§8). | Proposed |
-| D9 | **Long work runs outside the MCP call.** Tools return immediately. A detached `ultron run` worker advances a requirement until it needs a human, then stops. Closing the host agent doesn't stop work in progress (§9). | Proposed |
+| D9 | **Long work runs outside the MCP call.** Tools return immediately. A detached `ultron run` process advances a requirement until it needs a human, then stops. Closing the host agent doesn't stop work in progress (§9). | Proposed |
 | D10 | **State is an append-only event log committed to git.** SQLite is a local cache rebuilt from it. V0 is single-user, and team sync is in the backlog (§10). | Confirmed |
 | D11 | ultron commits each requirement's artifacts and event log to an `ultron/state` branch in the target repo. `ultron_merge` brings the requirement's folder into the target branch with its code. | Proposed |
 | D12 | ultron **proposes each release's version** from the intent: major, minor or patch, as in social-grid. A person confirms it at the spec gate (§13). | Confirmed |
-| D13 | ultron checks that the user is **signed in to a Claude Code account** before any worker runs (§14). | Confirmed |
+| D13 | ultron checks that the user is **signed in to a Claude Code account** before any ultron agent runs (§14). | Confirmed |
 | D14 | Look: the owner's Ultron pixel-art mascot in gunmetal with `#941212` eyes, a crimson `#E5484D` wordmark, and the owner's palette (§18). | Confirmed |
 | D15 | Evaluation: **SWE-bench Verified, sympy (75) and pytest (19)**, with a **5-requirement pilot** first. Evaluation runs don't create Jira tickets unless asked (§16). | Proposed |
-| D16 | Worker model: pinned in `ultron.toml`, default `claude-sonnet-5-5` for every role, and overridable per role. | Proposed |
-| D17 | **Workers talk only through the engine (a broker).** No worker contacts another directly. A worker asks a question with a broker tool, and the engine records it, applies limits, routes it to the right role (any adapter), or asks the human. Worker-facing tools are an agent-neutral MCP interface, so Codex workers can use them too (§11.2). | Confirmed (2026-11-09) |
+| D16 | Model for ultron agents: pinned in `ultron.toml`, default `claude-sonnet-5-5` for every role, and overridable per role. | Proposed |
+| D17 | **ultron agents talk only through the engine (a broker).** No ultron agent contacts another directly. An ultron agent asks a question with a broker tool, and the engine records it, applies limits, routes it to the right role (any adapter), or asks the human. Agent-facing tools are an agent-neutral MCP interface, so Codex-based ultron agents can use them too (§11.2). | Confirmed (2026-11-09) |
 | D18 | **Direct peer-to-peer messaging between agents (e.g. the A2A protocol) is a backup**, kept in `sdlc/backlog.md` and used only if brokered messaging proves too limiting. | Confirmed (2026-11-09) |
 | D19 | **V0 is single-user.** One person plays every human role (requester, architect, developer, tester) on their own machine. Team features (team sync, separate people per role, permissions, the multi-project registry) are in `sdlc/backlog.md`. | Confirmed (2026-11-09) |
-| D20 | **The host agent can monitor the workers.** It sees which workers are running, what each is doing step by step (files read and edited, commands and test runs, broker questions), how far along it is, and its usage so far. Monitoring is **read-only** and never controls a worker (§9.1). | Confirmed (2026-11-09) |
+| D20 | **The host agent monitors and can stop ultron agents.** It sees which ultron agents are running, what each is doing step by step, its progress and its usage. If one goes out of line, the host can **stop** it, and then retry, hold, or escalate the task to Jira. The engine also stops agents automatically on clear violations. Stopping can only end or pause work, never advance it (§9.1). | Confirmed (2026-11-09) |
 
-Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and worker agents
+Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and ultron agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
 
 ---
@@ -67,7 +67,7 @@ you    > merge it and deploy
 claude   (calls ultron_merge, ultron_deploy)  → a confirmation form for each, always answered by you
 ```
 
-Workers run in the background between these steps. Closing Claude Code doesn't stop them.
+ultron agents run in the background between these steps. Closing Claude Code doesn't stop them.
 
 ---
 
@@ -76,19 +76,19 @@ Workers run in the background between these steps. Closing Claude Code doesn't s
 | Actor | Type | In ultron |
 |---|---|---|
 | Requester | Human | Describes the need or supplies `intent.md`, and approves an intake draft |
-| Intake agent | Worker | Turns free text into `intent.md` and asks up to 5 clarifying questions. It adds no scope and has no tools. |
-| Spec agent | Worker | Writes `spec.md` and proposes the version bump |
+| Intake agent | ultron agent | Turns free text into `intent.md` and asks up to 5 clarifying questions. It adds no scope and has no tools. |
+| Spec agent | ultron agent | Writes `spec.md` and proposes the version bump |
 | Architect | Human | The `spec` gate |
-| Decomposition agent | Worker | Writes `tasks.md` and `tasks.json` (the dependency graph) |
-| Developer agent | Worker, one per task | Writes `plan.md`, then changes code following the approved plan |
-| Testing agent | Worker, one per task | Writes and runs tests against the acceptance criteria |
+| Decomposition agent | ultron agent | Writes `tasks.md` and `tasks.json` (the dependency graph) |
+| Developer agent | ultron agent, one per task | Writes `plan.md`, then changes code following the approved plan |
+| Testing agent | ultron agent, one per task | Writes and runs tests against the acceptance criteria |
 | Developer | Human | The `plan` gate |
 | Tester | Human | The `result` gate |
 | Developers | Human | Work the escalated Jira tickets |
 
 In V0 every human role above is **the same single user** (D19). The roles are still recorded separately, by gate,
 so that adding real teams later doesn't change the event log.
-| Maintenance agent | Worker | Diagnoses a detected failure and writes `intent.md`. It never edits code or deploys. |
+| Maintenance agent | ultron agent | Diagnoses a detected failure and writes `intent.md`. It never edits code or deploys. |
 | The host agent and its model (Claude Code in V0) | Host | Calls ultron's tools for the human. **It never decides a gate.** |
 
 **Requirement states** (only the engine changes them):
@@ -99,7 +99,8 @@ The bracketed steps happen only when they apply.
 **Task states:**
 `pending (deps unmet) → planning → awaiting_plan → (changes → planning)* → plan_approved → attempt k (coding →
 testing) → passed → awaiting_result → approved | rejected`, plus `failed` after `max_attempts` attempts.
-`rejected` and `failed` lead to `escalated`. A task whose dependency is escalated becomes `blocked` and is never
+`rejected` and `failed` lead to `escalated`. A stopped ultron agent leads to `held`, the next attempt, or
+`escalated` (§9.1). A task whose dependency is escalated becomes `blocked` and is never
 merged on its own.
 
 ---
@@ -158,12 +159,14 @@ merged on its own.
 **Records, caps and status**
 - **FR16** Every gate decision is an event: who (the git identity, or `auto`), when, the channel (form or terminal fallback), the
   decision and the comments. `decisions.md` is generated from the events.
-- **FR17** Every worker call is logged: role, requirement, task, attempt, prompt, result, duration, tokens and an
+- **FR17** Every ultron agent call is logged: role, requirement, task, attempt, prompt, result, duration, tokens and an
   API-equivalent cost estimate. The full transcript is kept locally, and a summary goes in the event log.
 - **FR18** Spending caps (API-equivalent USD) apply per requirement and per evaluation run. The engine checks the
-  total before each worker call. If a requirement hits its cap, its unfinished tasks are escalated.
+  total before each ultron agent call. If a requirement hits its cap, its unfinished tasks are escalated.
 - **FR19** `ultron_status` shows requirements, tasks, states, attempts (`2/3`) and what's waiting on the user.
-- **FR19a** `ultron_monitor` shows live worker activity (§9.1).
+- **FR19a** `ultron_monitor` shows live ultron agent activity (§9.1).
+- **FR19b** `ultron_stop` ends a running ultron agent, then retries, holds or escalates its task (§9.1). The engine
+  also stops agents automatically on clear violations.
 
 **Maintain**
 - **FR20** A scheduled `ultron maintain` checks the released version and files linked intents for new failures (§15).
@@ -182,8 +185,8 @@ merged on its own.
                                   target repo: ultron/state branch (event log, sdlc/ artifacts)
  background processes (started by ultron, never opened by the user):
    ultron run <requirement> ── advances until a human is needed, then exits
-        ├─ AgentRunner ── Claude Agent SDK adapter (V0) · later: Codex and others ── workers in their own worktrees
-        └─ broker ◀── worker tools (ask / report), agent-neutral MCP (§11.2)
+        ├─ AgentRunner ── Claude Agent SDK adapter (V0) · later: Codex and others ── ultron agents in their own worktrees
+        └─ broker ◀── agent tools (ask / report), agent-neutral MCP (§11.2)
    ultron maintain ── scheduled checks (§15)
    ultron gate ── terminal-only approval fallback (§8)
 ```
@@ -193,9 +196,9 @@ merged on its own.
 |---|---|
 | `mcp/` | The MCP server: host tools, elicitation forms, and resource links to artifacts |
 | `engine/` | States, gates, attempt limits, caps, dependency order. It's the only thing that changes state. |
-| `runner/` | `ultron run`: a detached worker process per requirement, with a lock, resume and scheduling of parallel tasks |
+| `runner/` | `ultron run`: a detached runner process per requirement, with a lock, resume and scheduling of parallel tasks |
 | `agents/` | The `AgentRunner` interface, the Agent SDK adapter, the `claude -p` fallback adapter, prompts per role and output schemas |
-| `broker/` | Worker-to-worker messaging through the engine, and the worker-facing MCP tools (§11.2) |
+| `broker/` | Agent-to-agent messaging through the engine, and the agent-facing MCP tools (§11.2) |
 | `store/` | The event log (source of truth), the SQLite cache and the artifact writer |
 | `git/` | Worktrees, branches, merges and diffs |
 | `intake/` | The template check and the intake flow |
@@ -211,7 +214,7 @@ This is how ultron is injected into Claude Code. Installing the plugin is the wh
 | Part | What it does |
 |---|---|
 | MCP registration | Starts the ultron MCP server when Claude Code starts |
-| Slash commands | `/ultron:init`, `/ultron:status`, `/ultron:submit`, `/ultron:review`, `/ultron:monitor`, `/ultron:doctor`, `/ultron:eval` |
+| Slash commands | `/ultron:init`, `/ultron:status`, `/ultron:submit`, `/ultron:review`, `/ultron:monitor`, `/ultron:stop`, `/ultron:doctor`, `/ultron:eval` |
 | Skill | Teaches the host model how ultron works: the requirement lifecycle, what each gate means, and that **only the human approves** (through the form, or by running the fallback command themselves) |
 | Guard hook | A PreToolUse hook that blocks the host model's own shell calls to `ultron gate`, the `bin/` entry points, and git operations on `ultron/state`. The block message tells the model to ask the human. |
 
@@ -231,7 +234,9 @@ Codex's own way of giving instructions in place of the skill. The core never cha
 | `ultron_status` | Requirements, tasks, states, and what's waiting on the user | No (read) |
 | `ultron_show` | Any artifact: request, intent, spec, tasks, a plan, a diff, test evidence, an attempt log, decisions | No (read) |
 | `ultron_explain` | Why an attempt failed or a task was escalated, from the engine's records | No (read) |
-| `ultron_monitor` | Live worker activity: who is running, their recent steps, progress and usage. It can follow from a cursor, or show one worker's recent transcript (§9.1). | No (read) |
+| `ultron_monitor` | Live ultron agent activity: who is running, their recent steps, progress and usage. It can follow from a cursor, or show one ultron agent's recent transcript (§9.1). | No (read) |
+| `ultron_stop` | Ends a running ultron agent with a reason, then `retry`, `hold` or `escalate` the task (§9.1) | No, because it can only end or pause work, never advance it |
+| `ultron_resume_task` | Resumes a `held` task from where it stopped, with an optional note from the user as feedback | **Human-confirmed** through a form, because it restarts work the host or engine stopped |
 | `ultron_settings` | The gate settings and `max_attempts` in force | No (read) |
 | `ultron_review` | Opens the review form for something waiting at a gate | **The decision is the human's**, through the form |
 | `ultron_merge` | Merges a requirement's approved work | **Human-confirmed** through a form. Locked. |
@@ -326,7 +331,7 @@ If elicitation isn't available, V0 uses the terminal fallback for every gate and
 MCP tool calls are short, but a requirement runs for hours. So:
 - **Starting work:** tools never do long work themselves. `ultron_submit`, and every gate decision, starts a
   **detached** `ultron run <R>` process and returns at once.
-- **Run until blocked:** `ultron run` advances the requirement (workers, attempts, parallel tasks) until it reaches a
+- **Run until blocked:** `ultron run` advances the requirement (ultron agents, attempts, parallel tasks) until it reaches a
   human gate, finishes or escalates, and then exits. Approving a gate starts it again.
 - **Lock:** each requirement has a lock file, so it never has two runners. A stale lock (dead process) is cleared.
 - **Resume:**
@@ -337,11 +342,11 @@ MCP tool calls are short, but a requirement runs for hours. So:
 
 ---
 
-### 9.1 Monitoring the workers (D20)
-The host agent can see what every worker is doing while it runs.
+### 9.1 Monitoring and stopping ultron agents (D20)
+The host agent can see what every ultron agent is doing while it runs.
 
-**What a worker reports.** Each adapter turns its agent's stream into the same small **activity events**, so a Codex
-worker later reports exactly like a Claude one:
+**What an ultron agent reports.** Each adapter turns its agent's stream into the same small **activity events**, so a Codex
+ultron agent later reports exactly like a Claude one:
 
 | Activity | Example |
 |---|---|
@@ -349,7 +354,7 @@ worker later reports exactly like a Claude one:
 | `read` / `edit` | `edit src/orders/status.py (+42 −3)` |
 | `run` | `run pytest tests/test_status.py → 3 passed, 1 failed` |
 | `ask` / `answer` | `ask spec: "expire link after 1h or 24h?"` → `answer: 24h (spec §3)` |
-| `thinking` | A one-line summary of the worker's current step, from its own messages. Not the full text. |
+| `thinking` | A one-line summary of the ultron agent's current step, from its own messages. Not the full text. |
 | `usage` | Tokens and the cost estimate so far for this call |
 
 **Where activity goes.**
@@ -358,27 +363,51 @@ worker later reports exactly like a Claude one:
 - Full transcripts stay in `.ultron/` as before.
 
 **How the host sees it.**
-- **`ultron_monitor()`** gives a snapshot. For each running worker: its role, requirement, task, attempt (`2/3`),
+- **`ultron_monitor()`** gives a snapshot. For each running ultron agent: its role, requirement, task, attempt (`2/3`),
   elapsed time, the last 5 activities and its usage. It also shows the queued tasks, and anything waiting on the user.
 - **`ultron_monitor(since=<cursor>)`** returns only what's new since the last call, so the host can follow along by
   calling it again. `/ultron:monitor` does this for the user.
-- **`ultron_monitor(task=R<n>/T<k>, transcript=true)`** gives the last part of one worker's transcript, for a closer
+- **`ultron_monitor(task=R<n>/T<k>, transcript=true)`** gives the last part of one ultron agent's transcript, for a closer
   look.
 - **Live push, if the host supports it:** ultron also offers activity as an MCP resource that the host can subscribe
   to, and sends progress notifications. Whether Claude Code shows these is checked in the first task. Polling with
   `since` always works.
 
+**Stopping an ultron agent that goes out of line.**
+`ultron_stop(task, reason, then=retry|hold|escalate)` (also `/ultron:stop`) lets the host end a running ultron agent:
+- **The engine ends it cleanly:** the SDK run is interrupted, the process tree is killed if needed, and any
+  half-finished edits in its worktree are kept for the record but not used.
+- **The reason is recorded** as an `agent.stopped` event, with who asked (the host or the user) and the last
+  activities.
+- **What happens next depends on `then`:**
+
+  | `then` | Result |
+  |---|---|
+  | `retry` | The stop counts as a failed attempt. The next attempt starts, with the stop reason as feedback. If no attempts are left, the task is escalated. |
+  | `hold` (default) | The task pauses as `held` until the user resumes it (`ultron_resume_task`) or escalates it. The attempt isn't counted. |
+  | `escalate` | The task goes to Jira now (§12), with the reason, the agent's recent activity and its transcript attached. This follows the `escalation` gate setting. |
+
+- **Automatic stops by the engine.** The engine stops an agent and applies `hold` when:
+  - it's denied 5 actions in one attempt (e.g. editing outside its worktree, pushing, using the web);
+  - it goes over the call's turn or budget limit;
+  - it shows no progress (no new activity) for 10 minutes;
+  - it exceeds its broker `ask` limit.
+
+  Each automatic stop is recorded with its trigger. The thresholds are in `ultron.toml`.
+
 **Rules.**
-- **Monitoring is read-only.** No monitoring tool can pause, stop, steer or message a worker. Only the engine
-  controls workers.
-- Activity text comes from the target repo and the workers, so it's returned as **untrusted data**, like every other
+- **Monitoring is read-only.** `ultron_monitor` never changes anything.
+- **`ultron_stop` can only end or pause work.** It can't pass a gate, steer an agent, or give it new instructions. A
+  host model may call it without asking, because stopping only makes things safer. Every stop is recorded.
+- **Only the engine controls ultron agents.**
+- Activity text comes from the target repo and the ultron agents, so it's returned as **untrusted data**, like every other
   tool result (§6).
 - Activity older than the requirement's completion plus 7 days is pruned from the local stream.
 
 ## 10. State: the event log (D10)
 - **Source of truth:** each requirement has an append-only `sdlc/requirements/R<n>/events.jsonl`. Each line holds
-  `seq`, time, actor (a git user, `auto`, `engine` or a worker role), type, requirement, task, attempt and data. Event
-  types include intake, gate decisions, attempts, escalations, worker-call summaries, and the config snapshot
+  `seq`, time, actor (a git user, `auto`, `engine` or an ultron agent role), type, requirement, task, attempt and data. Event
+  types include intake, gate decisions, attempts, escalations, agent-call summaries, and the config snapshot
   (`max_attempts`, gates).
 - **Writing:** the engine writes events and the files they refer to in **one commit** on the `ultron/state` branch,
   through its own worktree. State and artifacts can't drift apart, and git history is the audit trail.
@@ -389,17 +418,17 @@ worker later reports exactly like a Claude one:
 |---|---|---|
 | `sdlc/requirements/R<n>/` | `request.md`, `intent.md`, `intake.json`, `events.jsonl`, `spec.md`, `tasks.md`, `decisions.md`, `tasks/T<k>/plan.md`, attempt reports and test output | Yes, on `ultron/state`; merged with the code |
 | `sdlc/releases/v<version>.md` | What each release contains | Yes |
-| `.ultron/` | `state.db` (cache), worker transcripts, locks, the maintain log offset | No |
-| `ultron.toml` | Commands (test, smoke, deploy), log path, caps, `max_attempts`, gates, worker adapter and models, parallelism, Jira | Yes |
+| `.ultron/` | `state.db` (cache), agent transcripts, locks, the maintain log offset | No |
+| `ultron.toml` | Commands (test, smoke, deploy), log path, caps, `max_attempts`, gates, agent adapter and models, parallelism, Jira | Yes |
 | Work folder (default `C:\git\.ultron-work`, no spaces) | Task worktrees and the state worktree | No |
 | ultron home (default `C:\git\.ultron`) | Evaluation workspaces, hidden tests, reports, totals across repos | No |
 
 ---
 
-## 11. Worker agents (D3)
+## 11. ultron agents (D3)
 
 ### 11.1 Adapters
-- **One interface:** every worker call goes through `AgentRunner.run(role, prompt, workdir, allowed tools, output
+- **One interface:** every ultron agent call goes through `AgentRunner.run(role, prompt, workdir, allowed tools, output
   schema, limits) → result (output, structured data, usage, cost estimate, duration, transcript, stop reason)`.
 - **Prompts:** each role's prompt is a versioned template in the ultron package.
 - **V0 adapter: the Claude Agent SDK (Python).**
@@ -414,13 +443,13 @@ worker later reports exactly like a Claude one:
 - **Adapter choice:** `ultron.toml` chooses the adapter and the model **per role**. For example, a later version could
   run the developer role on Codex and the spec role on Claude.
 
-### 11.2 How workers communicate (D17)
+### 11.2 How ultron agents communicate (D17)
 - **Through files first.** Most handoffs are artifacts, as in the playbook: the developer reads the approved plan,
   and the testing agent's failing output goes back to the developer as the next attempt's input.
-- **Through the broker when a worker needs an answer.** Workers never contact each other. Each worker gets two
-  worker-facing tools:
+- **Through the broker when an ultron agent needs an answer.** ultron agents never contact each other. Each ultron agent gets two
+  agent-facing tools:
 
-  | Worker tool | Does |
+  | Agent tool | Does |
   |---|---|
   | `ask(role, question)` | Asks another role, e.g. the developer asks the spec agent whether the reset link should expire in 1 hour or 24 |
   | `report(kind, text)` | Leaves a note for the record, e.g. "acceptance criterion 3 is ambiguous" |
@@ -431,17 +460,17 @@ worker later reports exactly like a Claude one:
   3. It routes the question by running the target role through **that role's adapter**, with the spec and the
      question.
   4. If the target can't answer from the artifacts, the question goes **to the human** as an elicitation form, and
-     the asking worker waits.
-  5. A worker can never ask another to skip a gate or change its instructions. Answers come back as data, not as
+     the asking ultron agent waits.
+  5. An ultron agent can never ask another to skip a gate or change its instructions. Answers come back as data, not as
      instructions.
-- **Agent-neutral by design.** The worker tools are an MCP interface, served per worker session with a scoped identity
+- **Agent-neutral by design.** The agent tools are an MCP interface, served per agent session with a scoped identity
   (requirement, task, role). Any agent that supports MCP can use them:
   - the Agent SDK registers them in-process;
   - `claude -p` takes them through an MCP config;
   - Codex CLI, which supports MCP servers in its non-interactive mode, can take them the same way when its adapter is
     added. Verify this against Codex's docs at that time.
 
-  So mixing Claude and Codex workers doesn't change how they communicate.
+  So mixing Claude- and Codex-based ultron agents doesn't change how they communicate.
 - **Backup (D18):** direct peer-to-peer messaging, e.g. the A2A protocol, is in the backlog, for use only if brokered
   messaging proves too limiting.
 
@@ -454,7 +483,7 @@ worker later reports exactly like a Claude one:
 - **The engine creates the ticket, never a model.** The ticket has:
   - the title `[ultron] R<n>/T<k> <title>`;
   - the requirement, the task, the acceptance criteria and the reason (all attempts failed / rejected with comments /
-    cap reached);
+    cap reached / stopped, with the stop reason);
   - the last test output;
   - attachments: all attempt logs and `plan.md`;
   - labels.
@@ -476,7 +505,7 @@ worker later reports exactly like a Claude one:
   and the deploy form asks the user to confirm it.
 
 ## 14. Claude Code connection check (D13)
-`/ultron:doctor` runs, and `ultron run` checks before any worker, that:
+`/ultron:doctor` runs, and `ultron run` checks before any ultron agent, that:
 1. Claude Code is installed and at least the pinned version.
 2. The user is logged in with a claude.ai account. ultron shows the plan type.
 3. No API key in the environment would override the subscription. If one is set, ultron refuses unless the user
@@ -527,10 +556,10 @@ credentials.
 ## 17. Non-functional requirements
 - **NFR1** **The system enforces every rule, never the agents:**
   - the gates, the attempt limit, the caps and dependency order;
-  - no model or worker can pass a gate, merge, push or deploy (§6, §8, §11).
+  - no model or ultron agent can pass a gate, merge, push or deploy (§6, §8, §11).
 - **NFR2** Every artifact is a readable file, including the event log.
 - **NFR3** Works with any local git repo on Windows 11 and Linux. Work folders have no spaces in their paths.
-- **NFR4** Untrusted target repos can't steer the workers (§11) or the host model (§6).
+- **NFR4** Untrusted target repos can't steer the ultron agents (§11) or the host model (§6).
 - **NFR5** Work survives closing Claude Code, crashes and usage limits (§9).
 - **NFR6** Simple enough for one person to build and explain. No hosted server. Docker is needed only for evaluation
   grading.
@@ -599,7 +628,7 @@ HHHHHHHHCHHCHHHHHHHH
 | ⏳ waiting on you | Amber `#E3B341` |
 
 ## 19. Areas of concern
-1. **Pro plan limits.** Each requirement takes about 5–12 worker calls. The full 94-issue evaluation will hit the
+1. **Pro plan limits.** Each requirement takes about 5–12 ultron agent calls. The full 94-issue evaluation will hit the
    limits often and could take weeks. Runs pause and resume, and the pilot measures real usage first. A bigger plan
    would cost money, so it needs the owner's approval, and this spec doesn't propose one.
 2. **Elicitation support** (§8) has to be verified in the current Claude Code. The terminal fallback keeps V0 working
@@ -624,8 +653,11 @@ HHHHHHHHCHHCHHHHHHHH
    - ultron is injected into coding agents, rather than being "a CLI or minimal web page".
 10. **Agent SDK maturity.** The research saw the Python SDK at version 0.2.x, marked Alpha, so its API may change.
     ultron pins its version, and the `claude -p` fallback adapter sits behind the same interface.
-11. **Broker loops.** Two workers could keep asking each other questions. The per-attempt `ask` limit, the spending
+11. **Broker loops.** Two ultron agents could keep asking each other questions. The per-attempt `ask` limit, the spending
     cap, and the rule that only the engine routes messages stop this. A test covers it.
+12. **Stopping from text in the repo.** Untrusted repo text could push the host model to stop agents
+    unnecessarily. The harm is limited, because stopping only pauses work and every stop is recorded and visible.
+    The default `hold` means nothing is lost.
 
 ## 20. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
@@ -647,12 +679,15 @@ HHHHHHHHCHHCHHHHHHHH
 - **Monitoring tests:**
   - both adapters produce the same activity events from a recorded stream;
   - the `since` cursor never skips or repeats an activity;
-  - no monitoring tool can change a worker's state.
+  - `ultron_monitor` changes nothing;
+  - `ultron_stop` ends the agent, records the reason, and applies `retry`, `hold` or `escalate` correctly;
+  - each automatic-stop trigger fires;
+  - stopping can never pass a gate.
 - **Broker tests:**
   - every message becomes an event;
   - the `ask` limit and the caps hold;
   - unanswerable questions go to the human;
-  - workers have no way to reach each other directly.
+  - ultron agents have no way to reach each other directly.
 - **Integration test:** the real pipeline on `samples/sample-app`, a small Python app with tests.
 - **The demo, inside Claude Code with the plugin installed:**
   1. Describe a requirement for the sample app.
