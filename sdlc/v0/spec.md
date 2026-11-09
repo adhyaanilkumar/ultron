@@ -2,11 +2,12 @@
 Author: Claude (from `intent.md`), for adhyaanilkumar. Cycle: V0. Status: **draft (rewrite 2), awaiting review**.
 Date: 2026-11-09.
 
-ultron is an **MCP server**, and nothing else. It runs an AI-native SDLC pipeline on a target git repository. Any
-MCP client connects to it and calls its tools (V0 is tested with Claude Code):
-1. A client submits a requirement.
+ultron is **not a standalone application**. It's **injected into coding agents**: an MCP server plus a package for each
+host agent (a plugin with slash commands, a skill and a guard hook). The user works inside the coding agent they
+already use, which is Claude Code in V0:
+1. The user describes a requirement in the host agent.
 2. ultron's own worker agents turn it into a spec, tasks and plans, then code and test each task.
-3. A human approves at the gates through forms the server sends, and merges and deploys.
+3. The human approves at the gates through forms in the host agent, and merges and deploys.
 4. After a release, a maintenance check turns new failures into new requirements.
 
 An evaluation harness measures how often this works on real, closed GitHub issues.
@@ -21,14 +22,14 @@ confirm or change it during this review.
 | # | Decision | Status |
 |---|---|---|
 | D1 | Language: **Python**. | Confirmed |
-| D2 | **ultron is an MCP server only.** It has no chat interface, plugin, slash commands or UI of its own. Its product surface is its MCP tools (§6), usable from any MCP client. A few admin commands exist only as process entry points: setup, health check, the background runner, scheduled maintenance, evaluation, and the approval fallback (§5). | Confirmed (2026-11-09) |
+| D2 | **ultron is injected into coding agents, not a standalone app.** Its core is an MCP server, packaged for each host agent with a plugin, slash commands, a skill and a guard hook. V0 targets Claude Code, and other hosts (Codex first) are later packages. Every user-facing action is a tool or slash command inside the host. The only executables outside the host are background processes the user never opens directly: the runner, scheduled maintenance, and the terminal-only approval fallback (§5). | Confirmed (2026-11-09) |
 | D3 | **Worker agents are ultron's choice, made in config.** ultron runs its own worker agents (intake, spec, decomposition, developer, testing, maintenance) behind one `AgentRunner` interface. The V0 adapter is **Anthropic's Claude Agent SDK** (Python) on the user's Claude subscription. `claude -p` is the fallback adapter if the SDK can't use the subscription. Codex and other agents are later adapters, chosen per role in `ultron.toml` (§11). | Confirmed (2026-11-09) |
 | D4 | Terms: **requirement** = one `intent.md` and everything derived from it; **task** = one unit of work split from a requirement; **ticket** = only a Jira issue. Where the intent says "ticket" (§6, §8), this spec says "requirement". | Confirmed |
 | D5 | Failed tasks become **Jira tickets** on a Mon–Fri sprint (§12). This replaces the intent's CLI or web escalation board. Intake stays local, never through Jira, so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | **Hybrid intake.** The user writes a template `intent.md` or just describes the need. Free text goes to the intake agent, and the draft is approved at the `intent` gate (§7.1). | Confirmed |
 | D7 | **The user chooses** which approvals are human or automatic, and the dev→test attempt limit (`max_attempts`, default 3). `merge` and `deploy` are always human (§8). | Confirmed (feature); defaults, range and locks proposed |
-| D8 | **Approvals come from the human, never the model.** The preferred channel is an MCP **elicitation** form that the client shows to the human. The model can't fill it in. The fallback is the `ultron gate` admin command, which needs an interactive terminal and typed confirmation (§8). | Proposed |
-| D9 | **Long work runs outside the MCP call.** Tools return immediately. A detached `ultron run` worker advances a requirement until it needs a human, then stops. Closing the client doesn't stop work in progress (§9). | Proposed |
+| D8 | **Approvals come from the human, never the model.** The preferred channel is an MCP **elicitation** form that the host shows to the human. The model can't fill it in. The fallback is the `ultron gate` command, which needs an interactive terminal and typed confirmation. The guard hook also blocks the host model from running it (§8). | Proposed |
+| D9 | **Long work runs outside the MCP call.** Tools return immediately. A detached `ultron run` worker advances a requirement until it needs a human, then stops. Closing the host agent doesn't stop work in progress (§9). | Proposed |
 | D10 | **State is an append-only event log committed to git.** SQLite is a local cache rebuilt from it. V0 is single-user, and team sync is in the backlog (§10). | Confirmed |
 | D11 | ultron commits each requirement's artifacts and event log to an `ultron/state` branch in the target repo. `ultron_merge` brings the requirement's folder into the target branch with its code. | Proposed |
 | D12 | ultron **proposes each release's version** from the intent: major, minor or patch, as in social-grid. A person confirms it at the spec gate (§13). | Confirmed |
@@ -39,27 +40,32 @@ confirm or change it during this review.
 | D17 | **Workers talk only through the engine (a broker).** No worker contacts another directly. A worker asks a question with a broker tool, and the engine records it, applies limits, routes it to the right role (any adapter), or asks the human. Worker-facing tools are an agent-neutral MCP interface, so Codex workers can use them too (§11.2). | Confirmed (2026-11-09) |
 | D18 | **Direct peer-to-peer messaging between agents (e.g. the A2A protocol) is a backup**, kept in `sdlc/backlog.md` and used only if brokered messaging proves too limiting. | Confirmed (2026-11-09) |
 
-Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other agents (Codex first), direct
-peer-to-peer messaging, the registry, and the eval reviewer agent.
+Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and worker agents
+(Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
 
 ---
 
-## 2. How a client uses it (V0 flow)
+## 2. How it's used inside Claude Code (V0)
 
 ```
-client → ultron_submit(text)            ← returns R-20261109-a3f2 at once; a background runner starts
-client → ultron_status(R)               ← "intake has 2 questions"
-client → ultron_answer(R, answers)      ← the human's answers, passed on by the client
-         server → elicitation form to the human: approve intent?        (the human answers; the client model can't)
-client → ultron_status(R)               ← "spec ready, proposes v1.1.0 (minor); 2 plans waiting"
-client → ultron_show(R, "spec")         ← the artifact text
-client → ultron_review(R, "spec")       → elicitation form: Approve / Request changes / Reject, version, comment
+you    > /ultron:init                                   (once per repo: ultron_init sets the repo up)
+you    > customers keep phoning to ask where their order is, let them see it in the app
+claude   (calls ultron_submit)  ultron's intake agent has 2 questions: only logged-in users? delivery dates too?
+you    > logged in only, yes dates
+claude   (calls ultron_answer)  The draft intent R-20261109-a3f2 is ready.
+         ┌ ultron · approve intent R-20261109-a3f2? ─────────── [Approve] [Request changes] ┐  ← elicitation form,
+         └ comment: ________________________________________________________________________┘    answered only by you
+...later...
+you    > /ultron:status
+claude   (calls ultron_status)  The spec is ready (it proposes v1.1.0, a minor bump), and 2 plans are waiting.
+you    > show me the spec, then let me review it
+claude   (calls ultron_show, then ultron_review)  → form: Approve / Request changes / Reject, version, comment
 ...
-client → ultron_merge(R)                → elicitation form: confirm merge      (always human)
-client → ultron_deploy(repo)            → elicitation form: confirm release v1.1.0   (always human)
+you    > merge it and deploy
+claude   (calls ultron_merge, ultron_deploy)  → a confirmation form for each, always answered by you
 ```
 
-Workers run in the background between those calls. A client checks progress with `ultron_status`.
+Workers run in the background between these steps. Closing Claude Code doesn't stop them.
 
 ---
 
@@ -78,7 +84,7 @@ Workers run in the background between those calls. A client checks progress with
 | Tester | Human | The `result` gate |
 | Developers | Human | Work the escalated Jira tickets |
 | Maintenance agent | Worker | Diagnoses a detected failure and writes `intent.md`. It never edits code or deploys. |
-| The MCP client and its model | Client | Calls ultron's tools for the human. **It never decides a gate.** |
+| The host agent and its model (Claude Code in V0) | Host | Calls ultron's tools for the human. **It never decides a gate.** |
 
 **Requirement states** (only the engine changes them):
 `submitted → [intake_drafting → awaiting_intent] → spec_drafting → awaiting_spec → (changes → spec_drafting)* →
@@ -96,11 +102,13 @@ merged on its own.
 ## 4. Functional requirements
 
 **Setup**
-- **FR1** `ultron init --repo <path>` prepares a target repo:
+- **FR1** `/ultron:init` (the `ultron_init` tool) prepares the repo open in the host agent:
   - writes `ultron.toml`;
   - gitignores `.ultron/`;
   - creates the `ultron/state` branch;
-  - prints the MCP server entry to add to a client's MCP config (for Claude Code, one `claude mcp add` command).
+  - offers to register scheduled maintenance (§15).
+
+  Installing the plugin registers the MCP server with the host. No separate install step is needed.
 
 **Intake and spec**
 - **FR2** `ultron_submit` takes a template `intent.md` (a path or its text) or free text (§7.1). It returns the new
@@ -143,7 +151,7 @@ merged on its own.
   commit, time, who, requirements and tasks) and tags `v<version>`.
 
 **Records, caps and status**
-- **FR16** Every gate decision is an event: who (the git identity, or `auto`), when, the channel (form or CLI), the
+- **FR16** Every gate decision is an event: who (the git identity, or `auto`), when, the channel (form or terminal fallback), the
   decision and the comments. `decisions.md` is generated from the events.
 - **FR17** Every worker call is logged: role, requirement, task, attempt, prompt, result, duration, tokens and an
   API-equivalent cost estimate. The full transcript is kept locally, and a summary goes in the event log.
@@ -159,29 +167,27 @@ merged on its own.
 ## 5. Architecture
 
 ```
- any MCP client (V0 tested with Claude Code) ── elicitation forms are shown to the human by the client
-        │  MCP (stdio)
+ host coding agent (Claude Code in V0) ── ultron plugin: MCP registration · /ultron:* commands · skill · guard hook
+        │  MCP (stdio)                      elicitation forms are shown to the human by the host
         ▼
- ultron MCP server ── client tools (§6) ── engine (state machine, gates, attempt limit, caps)  ← the authority
-                                              │ writes events + artifacts (one commit per step)
-                                              ▼
-                                    target repo: ultron/state branch (event log, sdlc/ artifacts)
- engine starts, detached:
-        ▼
- ultron run <requirement> ── advances until a human is needed, then exits
-        │
-        ├─ AgentRunner ── Claude Agent SDK adapter (V0) ─┐
-        │              └─ later: Codex adapter, others ──┤── worker agents, each in its own worktree
-        │                                                 │
-        └─ broker ◀── worker tools (ask / report), agent-neutral MCP ──┘   (§11.2)
+ ultron MCP server ── host tools (§6) ── engine (state machine, gates, attempt limit, caps)  ← the authority
+                                            │ writes events + artifacts (one commit per step)
+                                            ▼
+                                  target repo: ultron/state branch (event log, sdlc/ artifacts)
+ background processes (started by ultron, never opened by the user):
+   ultron run <requirement> ── advances until a human is needed, then exits
+        ├─ AgentRunner ── Claude Agent SDK adapter (V0) · later: Codex and others ── workers in their own worktrees
+        └─ broker ◀── worker tools (ask / report), agent-neutral MCP (§11.2)
+   ultron maintain ── scheduled checks (§15)
+   ultron gate ── terminal-only approval fallback (§8)
 ```
 
 ### 5.1 Components
 | Component | Job |
 |---|---|
-| `mcp/` | The client-facing MCP server: tools, elicitation forms, and resource links to artifacts |
+| `mcp/` | The MCP server: host tools, elicitation forms, and resource links to artifacts |
 | `engine/` | States, gates, attempt limits, caps, dependency order. It's the only thing that changes state. |
-| `runner/` | `ultron run`: a detached worker per requirement, with a lock, resume and scheduling of parallel tasks |
+| `runner/` | `ultron run`: a detached worker process per requirement, with a lock, resume and scheduling of parallel tasks |
 | `agents/` | The `AgentRunner` interface, the Agent SDK adapter, the `claude -p` fallback adapter, prompts per role and output schemas |
 | `broker/` | Worker-to-worker messaging through the engine, and the worker-facing MCP tools (§11.2) |
 | `store/` | The event log (source of truth), the SQLite cache and the artifact writer |
@@ -190,7 +196,21 @@ merged on its own.
 | `jira/` | The escalation client |
 | `maintain/` | Checks, the log reader, fingerprints and the intent writer |
 | `eval/` | Dataset prep, runs, grading and the report |
-| `admin/` | Process entry points: `init`, `doctor`, `run`, `resume`, `maintain`, `eval`, and the `gate` fallback. None of them is a user interface. |
+| `hosts/claude-code/` | The Claude Code plugin (§5.2) |
+| `bin/` | The background entry points: `run`, `maintain` and the `gate` fallback. None of them is a user-facing app. |
+
+### 5.2 Host packaging: the Claude Code plugin (V0)
+This is how ultron is injected into Claude Code. Installing the plugin is the whole setup.
+
+| Part | What it does |
+|---|---|
+| MCP registration | Starts the ultron MCP server when Claude Code starts |
+| Slash commands | `/ultron:init`, `/ultron:status`, `/ultron:submit`, `/ultron:review`, `/ultron:doctor`, `/ultron:eval` |
+| Skill | Teaches the host model how ultron works: the requirement lifecycle, what each gate means, and that **only the human approves** (through the form, or by running the fallback command themselves) |
+| Guard hook | A PreToolUse hook that blocks the host model's own shell calls to `ultron gate`, the `bin/` entry points, and git operations on `ultron/state`. The block message tells the model to ask the human. |
+
+**Other hosts later.** Codex is first (backlog): the same MCP server, registered through Codex's MCP config, plus
+Codex's own way of giving instructions in place of the skill. The core never changes per host. Only the package does.
 
 ---
 
@@ -198,6 +218,8 @@ merged on its own.
 
 | Tool | Does | Human-only? |
 |---|---|---|
+| `ultron_init` | Prepares the open repo (FR1) | No |
+| `ultron_doctor` | Runs the Claude Code connection and setup checks (§14) | No (read) |
 | `ultron_submit` | Starts a requirement from a file or text, and returns its id | No |
 | `ultron_answer` | Passes the user's answers to the intake agent's questions | No |
 | `ultron_status` | Requirements, tasks, states, and what's waiting on the user | No (read) |
@@ -207,10 +229,11 @@ merged on its own.
 | `ultron_review` | Opens the review form for something waiting at a gate | **The decision is the human's**, through the form |
 | `ultron_merge` | Merges a requirement's approved work | **Human-confirmed** through a form. Locked. |
 | `ultron_deploy` | Runs the deploy script and records the release | **Human-confirmed** through a form. Locked. |
+| `ultron_eval` | Starts an evaluation run in the background (§16) | **Human-confirmed:** the form shows the usage and time estimate first |
 
 **No tool takes a decision as an argument.** For example, `ultron_review(id)` doesn't accept `approve=true`. The
 decision only comes back from the form the user fills in. Changing gate settings or `max_attempts` is done in
-`ultron.toml` or with the CLI, never through a tool.
+`ultron.toml`, never through a tool.
 
 **Tool results are untrusted data.** They include text from the target repo (specs, diffs, issue text), which could
 contain instructions. Results are labelled as data. Because no tool lets the model decide a gate, injected text can't
@@ -227,8 +250,7 @@ pass one.
   step starts.
 - **Intake agent:** used for free text, or a file that fails the check.
   - It drafts the template, reusing the user's phrases.
-  - It asks at most 5 questions. `ultron_status` lists them, and the client returns the human's answers with
-    `ultron_answer`.
+  - It asks at most 5 questions. The host model relays them, and `ultron_answer` returns the human's answers.
   - It adds no scope. Inferences are labelled "Assumption:", and unknowns go to Open questions.
   - Non-English input (e.g. Hindi or Hindi–English) gives an English intent that quotes the original lines.
   - It saves `intake.json`: the questions, answers, model and usage.
@@ -259,7 +281,7 @@ later without renaming anything. This spec writes `R<n>` for short.
 | `merge`, `deploy` | Merging, and running the deploy | human | **no: locked**, because the intent requires a human action |
 
 **Choosing the settings**
-- **Per repo:** in `ultron.toml`. **Per requirement:** at submit. **With the CLI:** `ultron gates set …`.
+- **Per repo:** in `ultron.toml`. **Per requirement:** at submit.
 - **Presets:** `strict` (every changeable gate human), `default` (the table above) and `unattended` (every changeable
   gate auto). Evaluation uses `unattended`.
 - **Snapshot:** a requirement keeps a snapshot of its settings from when it was submitted. A mid-run change applies
@@ -271,21 +293,23 @@ auto-approved. An auto decision is recorded with who = `auto`.
 
 **How a human decides (D8)**
 1. **Preferred: an MCP elicitation form.** `ultron_review` makes the server ask the *user* through Claude Code's
-   interface (Approve, Request changes or Reject, plus a comment, plus a version for `spec`). The client's model can't
+   interface (Approve, Request changes or Reject, plus a comment, plus a version for `spec`). The host model can't
    answer it.
-2. **Fallback: an admin command run by the human in a terminal.** `ultron gate <gate> <id>
+2. **Fallback: a command the human runs in a terminal.** `ultron gate <gate> <id>
    approve|changes|reject -m "…"`.
    - It only works on an interactive terminal (TTY): it shows the item and asks the human to type the requirement
      id to confirm.
-   - It refuses when stdin isn't a terminal. A model's shell tool has no terminal, so a model can't run it, and no
-     client-side hook is needed.
+   - It refuses when stdin isn't a terminal. A model's shell tool has no terminal, so a model can't run it.
+   - The plugin's guard hook also blocks the host model from even trying, which gives two independent layers.
 3. **The record:** the engine records the git identity, the time and the channel.
 
 **Verify first** (the first task checks these before anything else is built on them):
 - that the current Claude Code supports MCP elicitation, and how the forms look;
-- the TTY check in the gate fallback on Windows (PowerShell, Windows Terminal) and Linux.
+- the TTY check in the gate fallback on Windows (PowerShell, Windows Terminal) and Linux;
+- whether the user's `!` commands in Claude Code pass through PreToolUse hooks. The guard hook must not block a
+  command the human typed.
 
-If elicitation isn't available, V0 uses the CLI fallback for every gate and the design stays the same.
+If elicitation isn't available, V0 uses the terminal fallback for every gate and the design stays the same.
 
 ---
 
@@ -406,7 +430,7 @@ MCP tool calls are short, but a requirement runs for hours. So:
   and the deploy form asks the user to confirm it.
 
 ## 14. Claude Code connection check (D13)
-`ultron doctor` runs, and `ultron run` checks before any worker, that:
+`/ultron:doctor` runs, and `ultron run` checks before any worker, that:
 1. Claude Code is installed and at least the pinned version.
 2. The user is logged in with a claude.ai account. ultron shows the plan type.
 3. No API key in the environment would override the subscription. If one is set, ultron refuses unless the user
@@ -416,7 +440,7 @@ If a check fails, ultron stops and says how to fix it, for example `claude auth 
 credentials.
 
 ## 15. Maintain
-- **Trigger:** a scheduled `ultron maintain --repo <path> --once`, every 30 minutes by default. `ultron init` offers
+- **Trigger:** a scheduled `ultron maintain --repo <path> --once`, every 30 minutes by default. `/ultron:init` offers
   to register it with Windows Task Scheduler. The detection itself is deterministic and uses no model.
 - **Checks:**
   - the full test command and the smoke command against the released commit;
@@ -433,8 +457,9 @@ credentials.
 - **Notifying the user:** new maintenance findings appear in `ultron_status`.
 
 ## 16. Evaluation harness (intent §6)
-- **Command:** `ultron eval --suite <file> [--limit 5] [--resume] [--max-attempts N] [--intake auto]` is one CLI
-  command. It writes `report.md` and `report.json` under the ultron home.
+- **Command:** `/ultron:eval` (the `ultron_eval` tool) with a suite, plus optional `limit`, `resume`, `max_attempts`
+  and `intake`. It's one command, it runs in the background, and it writes `report.md` and `report.json` under the
+  ultron home.
 - **The run:** each instance becomes a requirement whose `intent.md` is the raw issue text. The gate preset is
   `unattended`, and the report lists the gate settings used. No Jira tickets are created unless `--jira` is given.
 - **Hidden tests:**
@@ -459,14 +484,17 @@ credentials.
   - no model or worker can pass a gate, merge, push or deploy (§6, §8, §11).
 - **NFR2** Every artifact is a readable file, including the event log.
 - **NFR3** Works with any local git repo on Windows 11 and Linux. Work folders have no spaces in their paths.
-- **NFR4** Untrusted target repos can't steer the workers (§11) or the client's model (§6).
+- **NFR4** Untrusted target repos can't steer the workers (§11) or the host model (§6).
 - **NFR5** Work survives closing Claude Code, crashes and usage limits (§9).
 - **NFR6** Simple enough for one person to build and explain. No hosted server. Docker is needed only for evaluation
   grading.
 
 ## 18. Look: mascot and palette (D14)
-- **Where it shows:** in the admin commands' terminal output (`ultron doctor`, `ultron eval`, `ultron gate`), with
-  full colour. MCP tool results are plain text, so they use the ✔ ⏳ ✖ ● markers without colour.
+- **Where it shows:**
+  - in full colour wherever ultron owns a terminal: the `ultron gate` fallback and the runner's console log;
+  - inside the host agent, ultron's output is the host's text, so it uses the ✔ ⏳ ✖ ● markers and the wordmark
+    without colour. Whether a Claude Code plugin can show the coloured mascot somewhere (for example in the status
+    line) is checked in the plugin task.
 - **On Windows:** ultron forces UTF-8 output, falls back to an ASCII mascot when Unicode isn't available, and
   respects `NO_COLOR`.
 
@@ -528,11 +556,14 @@ HHHHHHHHCHHCHHHHHHHH
 1. **Pro plan limits.** Each requirement takes about 5–12 worker calls. The full 94-issue evaluation will hit the
    limits often and could take weeks. Runs pause and resume, and the pilot measures real usage first. A bigger plan
    would cost money, so it needs the owner's approval, and this spec doesn't propose one.
-2. **Elicitation support** (§8) has to be verified in the current Claude Code. The CLI fallback keeps V0 working
+2. **Elicitation support** (§8) has to be verified in the current Claude Code. The terminal fallback keeps V0 working
    without it.
-3. **A client's model may have shell access** (Claude Code does). The gate fallback needs an interactive terminal and
-   typed confirmation, so a model's shell can't use it. Tests cover this.
-4. **Detached processes on Windows.** The runner has to survive the MCP server and its client closing. This is
+3. **The host model has shell access** (Claude Code does). Two layers stop it from approving:
+   - the gate fallback needs an interactive terminal and typed confirmation;
+   - the guard hook blocks the attempt.
+
+   Tests cover both.
+4. **Detached processes on Windows.** The runner has to survive the MCP server and the host agent closing. This is
    verified in the runner task.
 5. **Send-backs can't be measured in unattended runs**, because auto gates never send anything back. An optional
    reviewer agent is in the backlog.
@@ -544,7 +575,7 @@ HHHHHHHHCHHCHHHHHHHH
    - the escalation board is Jira;
    - "ticket" becomes "requirement";
    - the attempt limit is configurable;
-   - ultron is an MCP server, rather than "a CLI or minimal web page".
+   - ultron is injected into coding agents, rather than being "a CLI or minimal web page".
 10. **Agent SDK maturity.** The research saw the Python SDK at version 0.2.x, marked Alpha, so its API may change.
     ultron pins its version, and the `claude -p` fallback adapter sits behind the same interface.
 11. **Broker loops.** Two workers could keep asking each other questions. The per-attempt `ask` limit, the spending
@@ -563,16 +594,17 @@ HHHHHHHHCHHCHHHHHHHH
   - rebuilding the cache from the event log, which must give the same state as before;
   - the doctor checks.
 - **MCP tests:**
-  - the client tool list has no tool that accepts a gate decision;
+  - the host tool list has no tool that accepts a gate decision;
   - merge and deploy require a form;
-  - the gate fallback refuses without an interactive terminal.
+  - the gate fallback refuses without an interactive terminal;
+  - the guard hook blocks gate and `bin/` commands from the host model's shell.
 - **Broker tests:**
   - every message becomes an event;
   - the `ask` limit and the caps hold;
   - unanswerable questions go to the human;
   - workers have no way to reach each other directly.
 - **Integration test:** the real pipeline on `samples/sample-app`, a small Python app with tests.
-- **The demo, using Claude Code as the MCP client:**
+- **The demo, inside Claude Code with the plugin installed:**
   1. Describe a requirement for the sample app.
   2. Approve it through the gates.
   3. One task is forced to escalate to Jira.

@@ -17,10 +17,21 @@ Decided 2026-11-09 by the owner:
 - **Theme:** the same palette and mascot as the CLI (spec §11).
 
 ## Other coding agents (Codex first)
-New adapters behind `AgentRunner` (spec §11), chosen per role in `ultron.toml`. Codex is first: run `codex exec`
-non-interactively in the task worktree, and give it the broker's worker tools through its MCP config, so it talks to
-other workers the same way Claude workers do (spec §11.2). Verify Codex's current non-interactive and MCP options when
-this is planned.
+Codex matters in two separate ways, and they can come separately:
+- **As a host (ultron injected into Codex):**
+  - register the same ultron MCP server in Codex's MCP config;
+  - give Codex its instructions in Codex's own way, in place of the Claude Code skill;
+  - add a guard if Codex supports one.
+
+  The core doesn't change. Check whether Codex shows MCP elicitation forms. If it doesn't, approvals use the
+  terminal fallback.
+- **As a worker (ultron running Codex for a role):**
+  - add a new `AgentRunner` adapter that runs `codex exec` non-interactively in the task worktree;
+  - give it the broker's worker tools through its MCP config, so it talks to other workers the same way Claude
+    workers do (spec §11.2);
+  - choose it per role in `ultron.toml`.
+
+Verify Codex's current non-interactive and MCP options when this is planned.
 
 ## Multi-project registry
 A list of target repos in the ultron home, with totals across repos, and `ultron serve` covering all of them. V0 uses
