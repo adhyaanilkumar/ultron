@@ -30,6 +30,7 @@ the owner should confirm or change it during this review.
 | D13 | Evaluation runs don't create Jira tickets unless `--jira` is passed. They record escalations in the report and a local board file. | Proposed |
 | D14 | Model: pinned in `ultron.toml`, default `claude-sonnet-5-5` for every agent role, and overridable per role. | Proposed |
 | D15 | The user chooses how many dev→test attempts a task gets before it is escalated to Jira: `max_attempts`, default **3** as in the intent, allowed range 1–10 (§3 FR11). This changes the intent's fixed 3. | Confirmed (configurable); default and range proposed |
+| D16 | The user chooses which approvals are human and which are automatic, and can add extra human gates (`tasks`, `escalation`, `maintain`). `merge` and `deploy` stay human (§6). | Confirmed (feature); gate list, defaults and locks proposed |
 
 ---
 
@@ -70,7 +71,7 @@ on its own.
 - **FR3** The spec agent reads the intent and the target codebase (read-only tools) and writes `spec.md`. The spec
   contains requirements, design, acceptance criteria, flagged concerns, and a **proposed version bump with its reason**
   (§9).
-- **FR4** Spec gate: `ultron gate spec R<n> approve [--version X.Y.Z] [-m ...]` or `... changes -m "<comments>"`.
+- **FR4** Spec gate (when `spec` is `human`; see §6): `ultron gate spec R<n> approve [--version X.Y.Z] [-m ...]` or `... changes -m "<comments>"`.
   When changes are requested, the spec agent runs again with the comments and the previous spec. The loop repeats
   until the spec is approved. Nothing downstream starts before approval.
 
@@ -199,10 +200,47 @@ command-line limit. Each role is a prompt template file in `ultron/prompts/<role
 
 ---
 
-## 6. Gates and auto-approve
-- Each gate has a mode in `ultron.toml`: `manual` (the default) or `auto`. Only the evaluation harness sets `auto`.
-  An auto decision is recorded with who = `auto`, and the report lists which gates were automatic (intent §6).
-- Each gate is only a CLI command a person runs, or the harness's `auto` setting. No agent can trigger a gate.
+## 6. Choosing the human approvals (feature)
+The user chooses which approval points need a person (`human`) and which the engine passes on its own (`auto`), and
+can also add human approvals the intent doesn't have.
+
+| Gate | What gets approved | Default | Can be changed? |
+|---|---|---|---|
+| `spec` | `spec.md` and the proposed version (architect) | human | yes |
+| `tasks` | `tasks.md`, the task split and its dependencies | auto | yes (an extra human gate) |
+| `plan` | Each task's `plan.md` (developer) | human | yes |
+| `result` | Each tested task: the diff, plan and evidence (tester) | human | yes |
+| `escalation` | Confirm before ultron creates a Jira ticket | auto | yes (an extra human gate) |
+| `maintain` | Accept a maintenance-agent intent before it enters the spec step | auto | yes (an extra human gate) |
+| `merge` | Merging approved tasks into the target branch | human | **no**: locked |
+| `deploy` | Running the deploy script and recording the release | human | **no**: locked |
+
+**Locked gates.** `merge` and `deploy` stay human because the intent says only a human action merges or deploys
+(intent §5). Unlocking them would change the intent, so it needs the owner's explicit decision. See §15.
+
+**What `auto` means.** The engine passes the gate as soon as that stage's own checks pass:
+- `spec` and `tasks`: the output is valid against its schema. For `tasks`, the graph also has no cycles.
+- `plan`: `plan.md` has all four sections.
+- `result`: the engine's own test run passed. A failing task is never auto-approved; it uses up its attempts.
+
+An `auto` decision is recorded like a human one, with who = `auto`, in SQLite and `decisions.md`.
+
+**How the user chooses.**
+- **Per repo:** `[gates]` in `ultron.toml`, or `ultron gates set plan=auto tasks=human`.
+- **Per requirement:** `ultron submit … --gates plan=auto`.
+- **Presets:** `--gates strict` makes every changeable gate human, `default` is the table above, and `unattended`
+  makes every changeable gate auto. The evaluation harness uses `unattended`.
+- **Seeing the current setting:** `ultron gates` shows the gates in force. `ultron status` marks auto-passed steps
+  "(auto)".
+
+**Rules the engine enforces.**
+- **Snapshot:** a requirement takes a snapshot of its gate settings when it's submitted, as with `max_attempts`.
+- **Mid-run changes:** `ultron gates set R<n> plan=human` changes a running requirement, but only for gates it hasn't
+  reached yet. The change is recorded in `decisions.md`.
+- **Warning:** switching a default-human gate (`spec`, `plan`, `result`) to `auto` prints a one-line warning and is
+  recorded.
+- **Agents:** no agent can read or change gate settings.
+- **Evaluation:** every evaluation report lists the gate settings used for the run (intent §6).
 
 ## 7. Agent tests vs hidden evaluation tests (intent §10)
 - **The testing agent's tests** live in the task branch, in the repo's normal test folders, and are part of the
@@ -398,6 +436,9 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
    default. Mitigation: pin the minimum version, and `ultron doctor` checks the auth source.
 6. **This diverges from the intent.** Jira replaces the CLI or web escalation board (intent §5), "ticket" becomes
    "requirement", and the fixed 3 attempts become a user-chosen `max_attempts` (default 3). `intent.md` is left unchanged; this spec records these changes.
+7. **Locked merge and deploy gates (§6).** The intent requires a human action for both, so V0 doesn't let them be
+   switched to `auto`. If the owner wants automatic merging in a later version, it goes in `sdlc/backlog.md` and changes
+   the intent.
 
 ## 16. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
