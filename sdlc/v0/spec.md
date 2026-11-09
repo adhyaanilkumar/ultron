@@ -254,8 +254,9 @@ credentials itself.
 cell by cell without the image's watermark. The eyes are soft crimson and always stay red. The source image is not
 committed.
 - **Where it appears:** beside the wordmark in `ultron`, `ultron doctor` and `ultron status`.
-- **Rendering:** with half-block characters, 20 columns by 14 lines. `--quiet`, non-TTY output and `NO_COLOR` hide it.
-- **Grid:** 20 by 28. One row was mirrored to make it symmetric.
+- **Rendering:** with half-block characters, 10 columns by 7 lines. `--quiet`, non-TTY output and `NO_COLOR` hide it.
+- **Grid:** the owner asked for it smaller (2026-11-09), so this is the 20×28 trace scaled down to 10×14. Any eye pixel
+  survives the scale-down, and the eye rows were adjusted by hand to keep the two eyes as separate slanted red slits.
 
 | Code | Part | Colour |
 |---|---|---|
@@ -266,34 +267,20 @@ committed.
 | `.` | Background | Terminal background |
 
 ```
-.......HHHHHH.......
-.....HHHHHHHHHH.....
-....HHHHHHHHHHHH....
-...HHHHHHHHHHHHHH...
-..HCHHHHHHHHHHHHCH..
-H.HHCHHHHHHHHHHCHH.H
-H.HHCHHHHHHHHHHCHH.H
-H.HHCHHHHHHHHHHCHH.H
-H.HHCHHHHHHHHHHCHH.H
-H.HHCHHHHHHHHHHCHH.H
-H.HCHHHHHHHHHHHHCH.H
-H.HHHHHHHHHHHHHHHH.H
-HHHEHHHHHHHHHHHHEHHH
-HHHHEEHHHHHHHHEEHHHH
-HHHHEEEEHHHHEEEEHHHH
-HHHHHHEEEHHEEEHHHHHH
-HHHHHHHHCHHCHHHHHHHH
-.HHHHFHHCHHCHHFHHHH.
-.HFHFFFHHHHHHFFFHFH.
-.HFHFFFFHHHHFFFFHFH.
-..HHFFFFHFFHFFFFHH..
-...HHFFFFFFFFFFHH...
-....HFFFHFFHFFFH....
-....HHFFHHHHFFHH....
-.....HHHHHHHHHH.....
-......HHHHHHHH......
-.......HHHHHH.......
-........HHHH........
+...HHHH...
+..HHHHHH..
+.HHHHHHHH.
+HHCHHHHCHH
+HHCHHHHCHH
+HHHHHHHHHH
+HEEHHHHEEH
+HHEEHHEEHH
+HHHHCCHHHH
+HFFFHHFFFH
+.HFFFFFFH.
+..HFHHFH..
+...HHHH...
+....HH....
 ```
 
 **Palette.** Soft crimson, the owner's choice (2026-11-09). The first draft's `#E10600` was too bright.
