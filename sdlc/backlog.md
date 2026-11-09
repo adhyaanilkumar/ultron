@@ -19,9 +19,10 @@ Decided 2026-11-09 by the owner:
 ## Other coding agents
 New adapters behind the `AgentRunner` interface (spec §5), alongside Claude Code. Which agents is still to be decided.
 
-## Claude Code plugin front-end
-An optional plugin that provides `/ultron:*` commands. They call the CLI, so the CLI stays the only authority. It may
-also add PreToolUse hooks as a second guard on top of the engine's own checks.
+## ultron's own chat screen
+A full-screen chat in the terminal, built with Textual, with the mascot and palette. Natural language would map to
+ultron actions, and ultron itself (not the model) would draw the `[y/N]` approval box. V0 uses Claude Code as the
+chat instead (spec §10b, D18). Decided 2026-11-09.
 
 ## Multi-project registry
 A list of target repos in the ultron home, with totals across repos, and `ultron serve` covering all of them. V0 uses

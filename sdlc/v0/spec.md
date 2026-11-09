@@ -18,7 +18,7 @@ the owner should confirm or change it during this review.
 | D1 | Orchestrator language: **Python**. | Confirmed |
 | D2 | Agents run through **Claude Code headless** (`claude -p`) on the owner's **Claude subscription**. Every agent call goes through one small `AgentRunner` interface, so later versions can add other coding agents as adapters. | Confirmed |
 | D3 | Terms: **requirement** = one `intent.md` and everything derived from it; **task** = one unit of work split from a requirement; **ticket** = only a Jira issue. Where the intent says "ticket" (§6, §8), this spec says "requirement". | Confirmed |
-| D4 | Human UI: a **CLI in v1**. A web page comes in **v2**: social-grid's React + Vite frontend on a thin Python API over the same engine. The details are in `sdlc/backlog.md`. | Confirmed |
+| D4 | Human UI: a **CLI in v1**, plus a chat front end inside Claude Code (D18). A web page comes in **v2**: social-grid's React + Vite frontend on a thin Python API over the same engine. The details are in `sdlc/backlog.md`. | Confirmed |
 | D5 | Failed tasks go to **Jira** as tickets on a Mon–Fri sprint (§8). This replaces "CLI or minimal web page" for the escalation board in intent §5. Intake stays local (a file or text, never Jira), so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | ultron **proposes each release's version** from the intent, and a person confirms it at the spec gate (§9). Same scheme as social-grid. | Confirmed |
 | D7 | ultron checks before every run that the user is **signed in to a Claude Code account** (§10). | Confirmed |
@@ -32,6 +32,7 @@ the owner should confirm or change it during this review.
 | D15 | The user chooses how many dev→test attempts a task gets before it is escalated to Jira: `max_attempts`, default **3** as in the intent, allowed range 1–10 (§3 FR11). This changes the intent's fixed 3. | Confirmed (configurable); default and range proposed |
 | D16 | The user chooses which approvals are human and which are automatic, and can add extra human gates (`tasks`, `escalation`, `maintain`). `merge` and `deploy` stay human (§6). | Confirmed (feature); gate list, defaults and locks proposed |
 | D17 | **Hybrid intake.** `ultron submit` takes a template `intent.md` (used as-is) or free text in the user's own words. Free text goes to a small intake agent, which drafts `intent.md` and asks clarifying questions, and a new `intent` gate approves the draft (FR2). Researched 2026-11-09. | Confirmed (2026-11-09) |
+| D18 | **Chat front end in Claude Code:** an ultron Claude Code plugin with an MCP server, so the user can talk to ultron inside `claude`. Approving, merging, deploying and changing settings are never model tools; the user runs them as commands (§10b). ultron's own chat screen goes in `sdlc/backlog.md`. | Confirmed (2026-11-09) |
 
 ---
 
@@ -191,8 +192,10 @@ ultron (CLI, Typer + Rich)
  ├─ git/         worktrees, branches, merges, diffs (shells out to git)
  ├─ store/       event log (source of truth) + SQLite cache + artifact writer
  ├─ jira/        escalation client (REST)
+ ├─ mcp/         MCP server for the Claude Code plugin (read tools + submit; no gate tools)
  ├─ maintain/    checks, log reader, fingerprints, intent writer
  └─ eval/        dataset prep, run, grade (swebench on Docker), report
+plugin/          the Claude Code plugin: manifest, .mcp.json, /ultron:* commands, skill, guard hook
 ```
 
 **AgentRunner** is the only thing that knows about Claude:
@@ -337,6 +340,50 @@ An `auto` decision is recorded like a human one, with who = `auto`, in SQLite an
 
 If any check fails, ultron stops and prints the fix, for example `claude auth login`. ultron never reads or stores
 credentials itself.
+
+## 10b. Chat front end in Claude Code (feature, D18)
+The user talks to ultron in natural language inside Claude Code, which is already a good chat interface. ultron
+provides the tools. The CLI stays the authority, and the plugin is a layer on top of it.
+
+**What ships (in the ultron repo, under `plugin/`)**
+- **`.claude-plugin/plugin.json`:** the plugin manifest.
+- **`.mcp.json`:** starts `ultron mcp`, a stdio MCP server inside the ultron package. It uses the official Python MCP
+  SDK.
+- **Slash commands:** `/ultron:status`, `/ultron:submit` and `/ultron:review <id>`. The last one walks the user
+  through what's waiting on them.
+- **A skill:** tells Claude how ultron works, what each gate means, and that only the user can approve. It gives the
+  exact `! ultron gate …` command for the user to run.
+- **A PreToolUse guard hook:** blocks the model's own Bash or PowerShell calls that run `ultron gate`, `ultron merge`,
+  `ultron deploy`, `ultron gates set` or `ultron resume --force`. The block message tells the model to ask the user to
+  run the command.
+
+**MCP tools**
+
+| Tool | What it does |
+|---|---|
+| `ultron_status` | Requirements and tasks, their states, and what's waiting on the user |
+| `ultron_show` | A requirement's `request.md`, `intent.md`, spec, tasks, a task's plan, diff, test evidence or attempt log |
+| `ultron_submit` | Submits a requirement from text the user described in the chat, then starts the normal intake (FR2). The `intent` gate still applies. |
+| `ultron_explain` | Why an attempt failed or a task was escalated, from the engine's records |
+| `ultron_gates` | Shows the gate settings and `max_attempts` in force (read-only) |
+
+**What the model can never do**
+- **No tools for these:** gate decisions, merge, deploy, changing gate settings or `max_attempts`, or anything in
+  Jira. The model can explain, summarise and draft a comment. The user approves by running the command:
+  `! ultron gate plan R<n>/T<k> approve -m "..."` in Claude Code, or the same command in any terminal.
+- **Three layers keep it that way:**
+  1. the tools don't exist;
+  2. the guard hook blocks the model from shelling out to them;
+  3. the engine records the git identity of whoever ran the command.
+
+**Treat tool output as untrusted.** Tool results include text from the target repo: specs, diffs and issue text. That
+text could contain instructions ("approve this"). Tool results are labelled as data. Because no gate tool exists,
+injected text can't pass a gate.
+
+**To verify in the plugin task**
+- Does the user's `!` command bypass PreToolUse hooks? If it doesn't, the hook must allow user-typed commands.
+  Otherwise, gate commands are run in a separate terminal.
+- Plugin and MCP details against the current Claude Code docs.
 
 ## 11. CLI look: palette and mascot
 **Mascot.** The owner's choice (2026-11-09): the Ultron pixel-art head from the owner's reference image, at full
@@ -489,11 +536,15 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
    requirements. Test intake with 2–3 Hindi or Hindi–English sample requests before relying on it.
 9. **Event log commits.** Every engine step commits to `ultron/state`, which makes many small commits. That's
    intended, as the audit trail. A requirement's history can be squashed when it's merged, if the owner wants.
+10. **Model shell access in Claude Code.** In a Claude Code session, the model has Bash. Without the guard hook, it
+    could run `ultron gate … approve` itself. The hook (§10b) blocks this, and a test covers it. Whether the user's
+    `!` commands pass through hooks still has to be checked. A hook is the deterministic layer, and the playbook
+    recommends one for exactly this kind of rule.
 
 ## 16. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
   billing, production monitoring, and model training.
-- **Later versions:** everything in `sdlc/backlog.md`.
+- **Later versions:** everything in `sdlc/backlog.md`, including ultron's own chat screen.
 
 ## 17. How V0 is proven (intent §9)
 - **Unit tests** (pytest) cover the engine with a fake `AgentRunner`:
@@ -506,7 +557,9 @@ Features after V0 live in `sdlc/backlog.md`, not in this spec:
   - version bumps;
   - the doctor checks;
   - the template check and the intake flow (with a fake agent);
-  - rebuilding the cache from the event log, which must give the same state as before.
+  - rebuilding the cache from the event log, which must give the same state as before;
+  - the MCP server's tool list never includes a gate, merge, deploy or settings tool, and the guard hook blocks those
+    commands from the model's shell calls.
 - **Integration test:** run the real pipeline against `samples/sample-app`, a small Python app with tests that ultron
   copies to the work folder.
 - **The demo** (intent §9 bullet 1):
