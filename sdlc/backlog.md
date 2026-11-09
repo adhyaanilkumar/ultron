@@ -16,13 +16,11 @@ Decided 2026-11-09 by the owner:
 - **Launch:** `ultron serve` runs it locally. The CLI stays fully usable.
 - **Theme:** the same palette and mascot as the CLI (spec §11).
 
-## Other coding agents
-New adapters behind the `AgentRunner` interface (spec §5), alongside Claude Code. Which agents is still to be decided.
-
-## ultron's own chat screen
-A full-screen chat in the terminal, built with Textual, with the mascot and palette. Natural language would map to
-ultron actions, and ultron itself (not the model) would draw the `[y/N]` approval box. V0 uses Claude Code as the
-chat instead (spec §10b, D18). Decided 2026-11-09.
+## Other coding agents (Codex first)
+New adapters behind `AgentRunner` (spec §11), chosen per role in `ultron.toml`. Codex is first: run `codex exec`
+non-interactively in the task worktree, and give it the broker's worker tools through its MCP config, so it talks to
+other workers the same way Claude workers do (spec §11.2). Verify Codex's current non-interactive and MCP options when
+this is planned.
 
 ## Multi-project registry
 A list of target repos in the ultron home, with totals across repos, and `ultron serve` covering all of them. V0 uses
@@ -42,4 +40,9 @@ Decided 2026-11-09: V0 already keeps state as a git-committed event log (spec §
 - **Agent transcripts** stay local. Only call summaries are shared.
 
 Alternative for later: a central `ultron serve` with Postgres, combined with the v2 web page, for live multi-user use.
+
+## Direct peer-to-peer messaging between agents (backup)
+Decided 2026-11-09 as the backup to the engine broker (spec D18): agents message each other directly, for example
+with the A2A (Agent2Agent) protocol. Use it only if brokered messaging proves too limiting. Before adopting it, work
+out how gates, limits and the audit trail would still be enforced, because the broker currently guarantees all three.
 

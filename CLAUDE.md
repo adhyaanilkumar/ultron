@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # ultron
 
-An AI-native SDLC pipeline built as an **MCP server**: the user talks to it from Claude Code, and it drives its own worker agents over a **target** git repo through intent, spec, tasks, plans, code and tests, with human gates. The human approves through MCP elicitation forms, or the `ultron gate` CLI as a fallback, never through the model. It's a personal portfolio project with measured results, not a product. The brief is `sdlc/v0/intent.md`. The method is Anthropic's *AI-Native SDLC Playbook* (the PDF in the repo root), applied the way the owner applied it in `C:\git\social-grid`, which you can use as a reference for patterns.
+An AI-native SDLC pipeline that is **only an MCP server**, with no chat interface of its own. Any MCP client calls its tools. It drives its own worker agents (Claude Agent SDK by default, swappable per role) over a **target** git repo through intent, spec, tasks, plans, code and tests, with human gates. Workers communicate only through the engine (broker). The human approves through MCP elicitation forms, or the TTY-only `ultron gate` fallback, never through a model. It's a personal portfolio project with measured results, not a product. The brief is `sdlc/v0/intent.md`. The method is Anthropic's *AI-Native SDLC Playbook* (the PDF in the repo root), applied the way the owner applied it in `C:\git\social-grid`, which you can use as a reference for patterns.
 
 Status: pre-implementation. There's no stack, build or tests yet. When the stack is chosen, add a Commands section like social-grid's: `make build`, `make lint` and `make test`, each ending in a fixed success line.
 
