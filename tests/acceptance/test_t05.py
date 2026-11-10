@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -796,3 +797,226 @@ def test_ac5_actor_kinds() -> None:
     for bad in ("", "Engine", "agent:", "user:", "user:a\nb", 5):
         with pytest.raises(ev.EventError):
             ev.validate_actor(bad)
+
+
+# --- attempt 2: every way an event can fail to serialise or parse -------------------------------------------
+# Writing: the failure is an `InvalidEventError` (an `EventError`), never a raw TypeError, ValueError,
+# UnicodeEncodeError or RecursionError, and the log's bytes don't change. Reading: a bad line is an
+# `InvalidEventError` from `from_json` and a `CorruptLogError` from the log, never a raw exception.
+
+
+class _Opaque:
+    pass
+
+
+def _nested(depth: int) -> dict[str, Any]:
+    root: dict[str, Any] = {}
+    node = root
+    for _ in range(depth):
+        child: dict[str, Any] = {}
+        node["a"] = child
+        node = child
+    return root
+
+
+def _nested_list(depth: int) -> list[Any]:
+    root: list[Any] = []
+    node = root
+    for _ in range(depth):
+        child: list[Any] = []
+        node.append(child)
+        node = child
+    return root
+
+
+def _cyclic_dict() -> dict[str, Any]:
+    d: dict[str, Any] = {}
+    d["self"] = d
+    return d
+
+
+def _cyclic_list() -> list[Any]:
+    lst: list[Any] = []
+    lst.append(lst)
+    return lst
+
+
+def _raw(data: dict[Any, Any], **over: Any) -> ev.NewEvent:
+    fields: dict[str, Any] = {"actor": "engine", "type": "probe", "requirement": "R1"}
+    fields.update(over)
+    return ev.NewEvent(data=data, **fields)
+
+
+UNSERIALISABLE: dict[str, Callable[[], ev.NewEvent]] = {
+    "surrogate-value": lambda: _new(9, path="C:\\tmp\\\udcff.txt"),
+    "surrogate-key": lambda: _raw({"\ud800": 1}),
+    "surrogate-nested-list": lambda: _new(9, x=["ok", ["\udfff"]]),
+    "surrogate-nested-key": lambda: _new(9, x={"\udc80": 1}),
+    "surrogate-pair-as-two-code-points": lambda: _new(9, x="\ud83d\ude00"),
+    "surrogates-reversed": lambda: _new(9, x="\udc00\ud800"),
+    "surrogate-in-type": lambda: _raw({}, type="probe\udcff"),
+    "surrogate-in-actor": lambda: _raw({}, actor="user:Ann\udcff <a@b.c>"),
+    "surrogate-in-requirement": lambda: _raw({}, requirement="R\udcff"),
+    "surrogate-in-task": lambda: _raw({}, task="T\udcff", attempt=1),
+    "surrogate-in-gate-comments": lambda: ev.gate_decision(
+        "R1",
+        actor=USER,
+        gate="plan",
+        decision="changes",
+        channel="form",
+        comments="see \udcff",
+    ),
+    "nan": lambda: _new(9, x=float("nan")),
+    "inf": lambda: _new(9, x=float("-inf")),
+    "nan-key": lambda: _raw({float("nan"): 1}),
+    "big-int": lambda: _new(9, n=10**5000),
+    "big-int-key": lambda: _raw({10**5000: 1}),
+    "tuple-key": lambda: _raw({(1, 2): 1}),
+    "bytes": lambda: _new(9, x=b"raw"),
+    "set": lambda: _new(9, x={1, 2}),
+    "object": lambda: _new(9, x=_Opaque()),
+    "cycle-dict": lambda: _new(9, x=_cyclic_dict()),
+    "cycle-list": lambda: _new(9, x=_cyclic_list()),
+    "deep-dict": lambda: _new(9, x=_nested(100_000)),
+    "deep-list": lambda: _new(9, x=_nested_list(100_000)),
+}
+
+
+def _stamp(new: ev.NewEvent) -> ev.Event:
+    return ev.Event(
+        1,
+        1,
+        "2026-11-10T09:00:00.000Z",
+        new.actor,
+        new.type,
+        new.requirement,
+        new.task,
+        new.attempt,
+        new.data,
+        "0.0.1",
+    )
+
+
+@pytest.mark.parametrize("make", UNSERIALISABLE.values(), ids=UNSERIALISABLE.keys())
+def test_a2_unserialisable_event_raises_invalid_event_error(
+    make: Callable[[], ev.NewEvent],
+) -> None:
+    with pytest.raises(ev.InvalidEventError):
+        ev.to_json_line(_stamp(make()))
+
+
+@pytest.mark.parametrize("make", UNSERIALISABLE.values(), ids=UNSERIALISABLE.keys())
+def test_a2_unserialisable_event_anywhere_in_a_batch_writes_nothing(
+    tmp_path: Path, make: Callable[[], ev.NewEvent]
+) -> None:
+    log = _log(tmp_path)
+    log.append(_new(1))
+    before = log.path.read_bytes()
+    for batch in ([make(), _new(2)], [_new(2), make(), _new(3)], [_new(2), make()]):
+        with pytest.raises(ev.InvalidEventError):
+            log.append(batch)
+        assert log.path.read_bytes() == before
+    assert [e.seq for e in log.append(_new(2))] == [2]
+    assert _seqs(log) == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "case", ["surrogate-value", "nan", "big-int", "cycle-dict", "deep-dict"]
+)
+def test_a2_failed_first_append_leaves_no_bytes(tmp_path: Path, case: str) -> None:
+    log = _log(tmp_path)
+    with pytest.raises(ev.InvalidEventError):
+        log.append(UNSERIALISABLE[case]())
+    assert not log.path.exists() or log.path.read_bytes() == b""
+    assert [e.seq for e in log.append(_new(1))] == [1]
+
+
+def _with_data(seq: int, data: bytes) -> bytes:
+    """`_line(seq)` without its newline, with `data` spliced in as raw JSON text."""
+    line = _line(seq)[:-1]
+    old = b'"data":{"n":%d}' % seq
+    assert old in line
+    return line.replace(old, b'"data":' + data)
+
+
+UNPARSEABLE: dict[str, bytes] = {
+    "utf8-bom": b"\xef\xbb\xbf" + _line(2)[:-1],
+    "utf-16": _line(2)[:-1].decode().encode("utf-16"),
+    "invalid-utf8": _line(2)[:-1].replace(b'"probe"', b'"pr\xffbe"'),
+    "overlong-utf8": _line(2)[:-1].replace(b'"probe"', b'"pr\xc0\xafbe"'),
+    "utf8-encoded-surrogate": _line(2)[:-1].replace(b'"probe"', b'"pr\xed\xa0\x80"'),
+    "deep-object": _with_data(2, b'{"a":' * 100_000 + b"1" + b"}" * 100_000),
+    "deep-array": _with_data(2, b"[" * 100_000 + b"]" * 100_000),
+    "big-int-seq": _line(2)[:-1].replace(b'"seq":2', b'"seq":' + b"2" * 5000),
+    "big-int-in-data": _with_data(2, b'{"n":' + b"9" * 5000 + b"}"),
+    "nul": b"\x00",
+    "cut-json": _line(2)[:-12],
+    "trailing-garbage": _line(2)[:-1] + b"x",
+    "two-objects": _line(2)[:-1] + _line(3)[:-1],
+    "array": b"[]",
+    "null": b"null",
+    "string": b'"seq"',
+    "number": b"2",
+}
+
+
+@pytest.mark.parametrize("raw", UNPARSEABLE.values(), ids=UNPARSEABLE.keys())
+def test_a2_unparseable_line_raises_invalid_event_error(raw: bytes) -> None:
+    assert b"\n" not in raw
+    with pytest.raises(ev.InvalidEventError):
+        ev.from_json(raw)
+    with pytest.raises(ev.InvalidEventError):
+        ev.from_json(raw + b"\n")
+
+
+@pytest.mark.parametrize("raw", UNPARSEABLE.values(), ids=UNPARSEABLE.keys())
+def test_a2_unparseable_middle_line_is_corrupt_and_left_alone(
+    tmp_path: Path, raw: bytes
+) -> None:
+    path = tmp_path / "events.jsonl"
+    content = _line(1) + raw + b"\n" + _line(3)
+    path.write_bytes(content)
+    log = EventLog(path)
+    for strict in (False, True):
+        with pytest.raises(CorruptLogError) as info:
+            log.read(strict=strict)
+        assert info.value.line_no == 2
+    assert path.read_bytes() == content
+
+
+@pytest.mark.parametrize("raw", UNPARSEABLE.values(), ids=UNPARSEABLE.keys())
+def test_a2_unparseable_last_line_blocks_append_and_writes_nothing(
+    tmp_path: Path, raw: bytes
+) -> None:
+    path = tmp_path / "events.jsonl"
+    content = _line(1) + raw + b"\n"
+    path.write_bytes(content)
+    log = EventLog(path)
+    with pytest.raises(CorruptLogError):
+        log.append(_new(3))
+    with pytest.raises(CorruptLogError):
+        log.read()
+    assert log.repair() == b""  # a complete line is not a crash tail; repair leaves it
+    assert path.read_bytes() == content
+
+
+def test_a2_reasonable_nesting_still_round_trips_after_a_recursion_failure(
+    tmp_path: Path,
+) -> None:
+    log = _log(tmp_path)
+    with pytest.raises(ev.InvalidEventError):
+        log.append(_new(1, x=_nested(100_000)))
+    nested = {"d": _nested(200), "l": _nested_list(200)}
+    (written,) = log.append(_new(1, **nested))
+    (read,) = log.read(strict=True).events
+    assert read == written and read.data["d"] == nested["d"]
+
+
+def test_a2_ascii_escaped_text_from_another_writer_reads_and_rewrites_as_utf8() -> None:
+    """A line from a writer using `\\uXXXX` escapes (valid surrogate pairs included) is not refused."""
+    text = "\U0001f600 é"
+    line = _line(1, data={"t": text}).replace(text.encode(), b"\\ud83d\\ude00 \\u00e9")
+    assert line.isascii()
+    event = ev.from_json(line)
+    assert event.data == {"t": text}
+    assert text.encode() in ev.to_json_line(event)
