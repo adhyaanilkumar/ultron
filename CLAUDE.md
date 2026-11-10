@@ -33,7 +33,7 @@ When Claude makes the same mistake twice, the correction goes under "Things Clau
 Run build, lint and test before reporting anything done, and paste the result lines. Never skip, weaken or delete a failing test.
 
 ## Budget
-₹12,000 a month is the cap across ultron and social-grid together (raised from ₹3,500 on 2026-11-09). ultron's agent calls run on the owner's Claude subscription (Claude Code headless, Pro plan), so they use plan limits, not money. Before adding anything that costs money, state its monthly cost in INR and stop for approval. Before a long run (for example an evaluation), estimate the usage and stop for approval.
+Two caps, set by the owner (clarified 2026-11-10): **₹12,000 a month for all personal-project expenses**, and within that, **₹3,500 a month for deployment and hosting across all projects**. ultron's agent calls run on the owner's Claude subscription (Pro plan), so they use plan limits, not money. Before adding anything that costs money, state its monthly cost in INR and which cap it counts against, and stop for approval. Before a long run (for example an evaluation), estimate the usage and stop for approval.
 
 ## What ultron must enforce (from `intent.md`)
 The system enforces these, not the agents:
