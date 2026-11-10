@@ -36,7 +36,7 @@ confirm or change it during this review.
 | D13 | ultron checks that the user is **signed in to a Claude Code account** before any ultron agent runs (§14). | Confirmed |
 | D14 | Look: the owner's Ultron pixel-art mascot in gunmetal with `#941212` eyes, a crimson `#E5484D` wordmark, and the owner's palette (§18). | Confirmed |
 | D15 | Evaluation: **SWE-bench Verified, sympy (75) and pytest (19)**, with a **5-requirement pilot** first. Evaluation runs don't create Jira tickets unless asked (§16). | Proposed |
-| D16 | Model for ultron agents: pinned in `ultron.toml`, default `claude-sonnet-5-5` for every role, and overridable per role. | Proposed |
+| D16 | Model for ultron agents: pinned in `ultron.toml` per role, default `claude-sonnet-5-5` at `medium` effort. The developer and testing agents instead run at their task's **rung** (D25). | Proposed |
 | D17 | **ultron agents talk only through the engine (a broker).** No ultron agent contacts another directly. An ultron agent asks a question with a broker tool, and the engine records it, applies limits, routes it to the right role (any adapter), or asks the human. Agent-facing tools are an agent-neutral MCP interface, so Codex-based ultron agents can use them too (§11.2). | Confirmed (2026-11-09) |
 | D18 | **Direct peer-to-peer messaging between agents (e.g. the A2A protocol) is a backup**, kept in `sdlc/backlog.md` and used only if brokered messaging proves too limiting. | Confirmed (2026-11-09) |
 | D19 | **V0 is single-user.** One person plays every human role (requester, architect, developer, tester) on their own machine. Team features (team sync, separate people per role, permissions, the multi-project registry) are in `sdlc/backlog.md`. | Confirmed (2026-11-09) |
@@ -45,6 +45,7 @@ confirm or change it during this review.
 | D22 | **ultron agents get context built by the engine, per role** (§11.3). That includes the target repo's `CLAUDE.md` and `AGENTS.md`, passed **as data** (conventions to follow unless they conflict with ultron's rules), never as settings. Repo hooks, permissions and MCP servers are still never loaded. It's on by default for repos set up with `/ultron:init`, and off in evaluation runs. | Confirmed (2026-11-10) |
 | D23 | **Research-assisted intake: one read-only intake scout.** Before the intake agent drafts, a scout reads the target codebase and the repo's past requirements (no web, no shell, no Jira in V0) and writes facts with sources to `research.md`. The intake agent uses it only to ask sharper questions, fill "Affected users and systems" and flag possible duplicates. Problem and Proposed outcome stay in the user's words. Switch: `intake_research = "off" \| "local"`, default `local`, forced off in evaluation runs (§7.1). Researched 2026-11-10. | Confirmed (2026-11-10) |
 | D24 | **ultron uses deployment and maintenance infrastructure but never builds it on its own.** It uses them through a small contract in `ultron.toml` (§10.1): only `test` is required, and `deploy` and `rollback` are optional but come as a pair. If a repo needs infrastructure built, that's an ordinary requirement through the pipeline, with a human-steps checklist and a cost table (§7.3). Accounts, credentials, payments and provisioning are always done by the human. Researched 2026-11-10. | Confirmed (2026-11-10) |
+| D25 | **Model and effort per task, raised on failure.** The decomposition agent scores each task's complexity with a fixed rubric and picks a starting **rung** (a model plus effort level, from Haiku 5.5 medium up to Opus 5.5 max). Every counted failed attempt moves the task up one rung. Fable is never used unless the owner approves its cost for a requirement (§11.4). Researched 2026-11-10. | Proposed |
 
 Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and ultron agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
@@ -299,7 +300,8 @@ merged on its own.
 **Tasks and plans**
 - **FR5** The decomposition agent writes `tasks.md` and `tasks.json`. Each task has id, title, description,
   acceptance criteria, `depends_on`, `ships_independently`, and a `type`: `story`, `feature` or `bug`. The type
-  sets the Jira issue type if the task is escalated. Tasks of a maintenance requirement default to `bug`. The engine rejects a cycle in the graph or an unknown
+  sets the Jira issue type if the task is escalated. Tasks of a maintenance requirement default to `bug`. Each task
+  also gets a complexity score, its reasons and a starting **rung** (§11.4). The engine rejects a cycle in the graph or an unknown
   dependency and reruns the agent, once.
 - **FR6** Tasks whose dependencies are all approved run in parallel (`max_parallel`, default 2), each in its own git
   worktree and branch. A dependent task starts from its dependencies' approved work, merged in by the engine (never
@@ -318,6 +320,8 @@ merged on its own.
   - the user chooses the number: default 3, range 1–10, set per repo or per requirement;
   - it's fixed for each task when the task is created;
   - time waiting at a gate isn't an attempt.
+- **FR10a** Each counted failed attempt runs the next attempt **one rung higher** (§11.4), up to the cap. The engine,
+  not an agent, sets the model and effort for every call, and logs what actually ran.
 - **FR11** If a developer agent's diff changes a test file the testing agent wrote, that attempt fails.
 
 **Result, escalation, merge and deploy**
@@ -748,6 +752,72 @@ afterwards.
 
 ---
 
+### 11.4 Model and effort per task (D25)
+Stronger models and higher effort pass more tasks but use the Pro plan's limits faster. ultron starts each task as
+low as its complexity allows and climbs only when an attempt fails.
+
+**The rung ladder** (V0, Pro plan):
+
+| Rung | Model | Effort |
+|---|---|---|
+| R0 | Haiku 5.5 | medium |
+| R1 | Sonnet 5.5 | medium |
+| R2 | Sonnet 5.5 | high |
+| R3 | Opus 5.5 | high |
+| R4 | Opus 5.5 | xhigh |
+| R5 (cap) | Opus 5.5 | max |
+
+- **Why this order:** on Artificial Analysis, Opus 5.5 high scores above Sonnet 5.5 xhigh at a lower cost, so above
+  `high` the ladder changes model rather than raising effort.
+- **Fable 5.2 is off the ladder.** On Pro it's paid from usage credits (real money), so it's used only for a
+  requirement whose spec gate approves it, with its INR cost stated first (CLAUDE.md budget rule).
+- **The ladder is configurable** in `ultron.toml`, along with a cap (`max_rung`) per repo or requirement.
+
+**Starting rung: the decomposition agent's rubric.** It scores each factor 0, 1 or 2, judged from the codebase, not
+only the spec wording (research found task wording alone predicts difficulty poorly):
+
+| Factor | 0 | 1 | 2 |
+|---|---|---|---|
+| Files or modules touched | 1–2 | 3–5 | 6 or more |
+| Change type | New, additive | Edits existing code | Cross-module refactor |
+| Risk | None | Moderate | Concurrency, security or auth, migrations, data loss, public API |
+| Ambiguity of acceptance criteria | Low | Some | High |
+| Algorithmic difficulty | Low | Some | High |
+| Test surface | Small | Medium | Large |
+
+| Total | Starting rung |
+|---|---|
+| 0–2 | R0 |
+| 3–4 | R1 |
+| 5–6 | R2 |
+| 7–8 | R3 |
+| 9 or more | R4 |
+
+- **Any risk factor scored 2 forces at least R3.**
+- The agent writes the scores, a one-line reason per factor, and the rung into `tasks.md`. The engine recomputes the
+  rung from the scores, so the agent can't pick a rung that doesn't match them.
+- **The plan can adjust it.** After reading the code, the developer agent may propose a different rung in `plan.md`
+  with a reason. The `plan` gate shows it, and the user can also change it there.
+- The testing agent runs at the task's rung, but never below R1.
+
+**Climbing on failure (FR10a).**
+- **Counted failures move up one rung:** failing tests, a stop by the user or the engine (§9.1), hitting the turn or
+  token limit, or ending without passing tests.
+- **Not counted, and no climb:** usage limits, overload, and infrastructure errors. The engine waits and reruns the
+  attempt at the same rung.
+- **The same test failing the same way twice** sends the task back to the `plan` gate with that evidence, instead of
+  just adding power.
+- **At the cap,** later attempts stay at the cap.
+- **On escalation to Jira,** the ticket lists the rung of each attempt.
+- With the default of 3 attempts, a task that starts at R2 runs R2, then R3, then R4.
+
+**Running it.**
+- Each attempt is a fresh Agent SDK session with `model` and `effort` set by the engine.
+- The SDK can quietly lower an unsupported effort level, so the engine records the model and effort that actually ran.
+- If a model isn't available on the plan, the engine uses the highest available rung below it and records that.
+- `/ultron:doctor` lists the models the login can use.
+- `max_parallel` (FR6) limits how many tasks run at once, so parallel R4–R5 attempts don't exhaust the 5-hour limit.
+
 ## 12. Escalation to Jira (D5)
 - **Connection:** Jira Cloud, configured through environment variables (`JIRA_BASE_URL`, `JIRA_EMAIL`,
   `JIRA_API_TOKEN`). Credentials are never stored in files. Jira Cloud Free costs ₹0 for up to 10 users.
@@ -962,6 +1032,10 @@ HHHHHHHHCHHCHHHHHHHH
     is old.
 18. **Two approvals for one release.** If the deploy script triggers a CI release workflow with its own required
     reviewer (as social-grid's does), the user approves twice. That's deliberate defence in depth.
+19. **Rungs and Pro limits.** Exact quota costs per model and effort aren't published, and the rubric is ultron's
+    own (no published rubric predicts difficulty before coding). The evaluation (§16) reports the pass rate and
+    usage per rung, so the ladder and thresholds can be tuned. Whether the Agent SDK may run on a Pro login is
+    still checked in the first task (§11.1).
 
 ## 20. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
@@ -992,6 +1066,11 @@ HHHHHHHHCHHCHHHHHHHH
   - each role's context contains exactly its listed files;
   - repo instructions are included when the switch is on, left out in evaluation runs, and recorded with a hash;
   - the SessionStart hook prints the right summary from a sample cache, and nothing for a repo without ultron.
+- **Rung tests:**
+  - the engine's rung matches the rubric scores, and a risk factor of 2 forces at least R3;
+  - counted failures climb one rung, uncounted ones don't, and the cap holds;
+  - a repeated identical failure goes back to the `plan` gate;
+  - Fable is never requested without an approved spec.
 - **Monitoring tests:**
   - both adapters produce the same activity events from a recorded stream;
   - the `since` cursor never skips or repeats an activity;
