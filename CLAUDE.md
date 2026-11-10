@@ -25,6 +25,10 @@ Every stage commits an artifact the next stage reads, and the owner approves eac
 
 When Claude makes the same mistake twice, the correction goes under "Things Claude gets wrong" below. Keep this file to about a page.
 
+## Tracking this project in Jira
+- **Where:** site `adhyasworkspace-45421657.atlassian.net`, project **AD** (adhya-work). Epic **AD-378** is ultron, and **AD-379** is social-grid. Sprints are 2 weeks and are managed on the board, not by us.
+- **When:** after the owner approves `tasks.md`, file each task under its epic as a Story, Feature or Bug, and put the Jira key next to the task in `tasks.md`.
+
 ## Verifying your work
 Run build, lint and test before reporting anything done, and paste the result lines. Never skip, weaken or delete a failing test.
 
@@ -34,7 +38,7 @@ Run build, lint and test before reporting anything done, and paste the result li
 ## What ultron must enforce (from `intent.md`)
 The system enforces these, not the agents:
 - Flow: intent → spec agent → **architect gate** → decomposition (task DAG) → per task, in parallel in isolated worktrees: plan → **plan gate** → up to `max_attempts` attempts (code, then tests; the user chooses the limit, default 3) → **tester gate** → human merge in dependency order → human deploy (a script) → the maintenance agent files a new `intent.md`.
-- A revised plan goes back through the plan gate. Time waiting at a gate isn't an attempt. Failed or rejected tasks become Jira tickets on the escalation board (a Mon–Fri sprint) with all attempt logs.
+- A revised plan goes back through the plan gate. Time waiting at a gate isn't an attempt. Failed or rejected tasks become Jira tickets (Story, Feature or Bug) under the repo's epic, in the board's current 2-week sprint, with all attempt logs. ultron never creates sprints.
 - Agents never pass a gate, merge or deploy. The maintenance agent never edits code.
 - The user chooses which gates are human or auto per repo or requirement (spec §6). `merge` and `deploy` are always human. Every auto decision is recorded as `auto`.
 - Every artifact is a file on disk. Every gate decision records who, when and comments. Every agent call is logged with inputs, outputs, duration and tokens/cost.

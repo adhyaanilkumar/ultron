@@ -25,7 +25,7 @@ confirm or change it during this review.
 | D2 | **ultron is injected into coding agents, not a standalone app.** Its core is an MCP server, packaged for each host agent with a plugin, slash commands, a skill and a guard hook. V0 targets Claude Code, and other hosts (Codex first) are later packages. Every user-facing action is a tool or slash command inside the host. The only executables outside the host are background processes the user never opens directly: the runner, scheduled maintenance, and the terminal-only approval fallback (§5). | Confirmed (2026-11-09) |
 | D3 | **ultron agents are ultron's choice, made in config.** ultron runs its own agents, called **ultron agents** (intake, spec, decomposition, developer, testing, maintenance) behind one `AgentRunner` interface. The V0 adapter is **Anthropic's Claude Agent SDK** (Python) on the user's Claude subscription. `claude -p` is the fallback adapter if the SDK can't use the subscription. Codex and other agents are later adapters, chosen per role in `ultron.toml` (§11). | Confirmed (2026-11-09) |
 | D4 | Terms: **requirement** = one `intent.md` and everything derived from it; **task** = one unit of work split from a requirement; **ticket** = only a Jira issue. Where the intent says "ticket" (§6, §8), this spec says "requirement". | Confirmed |
-| D5 | Failed tasks become **Jira tickets** on a Mon–Fri sprint (§12). This replaces the intent's CLI or web escalation board. Intake stays local, never through Jira, so intent §7 still holds. | Confirmed (Jira); details proposed |
+| D5 | Failed tasks become **Jira tickets** under the target repo's epic, as a Story, Feature or Bug, in the board's current **2-week sprint** (§12). ultron never creates sprints (changed from Mon–Fri on 2026-11-10). This replaces the intent's CLI or web escalation board. Intake stays local, never through Jira, so intent §7 still holds. | Confirmed (Jira); details proposed |
 | D6 | **Hybrid intake.** The user writes a template `intent.md` or just describes the need. Free text goes to the intake agent, and the draft is approved at the `intent` gate (§7.1). | Confirmed |
 | D7 | **The user chooses** which approvals are human or automatic, and the dev→test attempt limit (`max_attempts`, default 3). `merge` and `deploy` are always human (§8). | Confirmed (feature); defaults, range and locks proposed |
 | D8 | **Approvals come from the human, never the model.** The preferred channel is an MCP **elicitation** form that the host shows to the human. The model can't fill it in. The fallback is the `ultron gate` command, which needs an interactive terminal and typed confirmation. The guard hook also blocks the host model from running it (§8). | Proposed |
@@ -126,7 +126,8 @@ merged on its own.
 
 **Tasks and plans**
 - **FR5** The decomposition agent writes `tasks.md` and `tasks.json`. Each task has id, title, description,
-  acceptance criteria, `depends_on` and `ships_independently`. The engine rejects a cycle in the graph or an unknown
+  acceptance criteria, `depends_on`, `ships_independently`, and a `type`: `story`, `feature` or `bug`. The type
+  sets the Jira issue type if the task is escalated. Tasks of a maintenance requirement default to `bug`. The engine rejects a cycle in the graph or an unknown
   dependency and reruns the agent, once.
 - **FR6** Tasks whose dependencies are all approved run in parallel (`max_parallel`, default 2), each in its own git
   worktree and branch. A dependent task starts from its dependencies' approved work, merged in by the engine (never
@@ -478,8 +479,12 @@ ultron agent later reports exactly like a Claude one:
 
 ## 12. Escalation to Jira (D5)
 - **Connection:** Jira Cloud, configured through environment variables (`JIRA_BASE_URL`, `JIRA_EMAIL`,
-  `JIRA_API_TOKEN`) plus the project and board in `ultron.toml`. Credentials are never stored in files. Jira Cloud Free
-  costs ₹0 for up to 10 users.
+  `JIRA_API_TOKEN`). Credentials are never stored in files. Jira Cloud Free costs ₹0 for up to 10 users.
+- **Where tickets go:** each target repo's `ultron.toml` names the Jira **project**, **board** and **epic**. For
+  example, the owner's site uses project `AD`, with epic `AD-378` for ultron itself and `AD-379` for social-grid. Every
+  escalation from that repo is filed under its epic.
+- **Issue type:** taken from the task's `type`: **Story**, **Feature** or **Bug**. If the project has no Feature type,
+  ultron falls back to Story and says so in the ticket.
 - **The engine creates the ticket, never a model.** The ticket has:
   - the title `[ultron] R<n>/T<k> <title>`;
   - the requirement, the task, the acceptance criteria and the reason (all attempts failed / rejected with comments /
@@ -487,11 +492,12 @@ ultron agent later reports exactly like a Claude one:
   - the last test output;
   - attachments: all attempt logs and `plan.md`;
   - labels.
-- **Sprint:** the ticket goes into the current Mon–Fri sprint. If there isn't one, ultron creates
-  `Escalations <Monday date>`. Weekend escalations go into the next week's sprint.
+- **Sprint:** the board already runs **2-week sprints**, and ultron uses them as they are. It **never creates or
+  changes sprints**. A ticket goes into the board's **active** sprint. If none is active, it goes into the next
+  planned sprint, and if none is planned, into the backlog. Whichever happened is recorded in the event log.
 - **Reliability:**
   - if Jira can't be reached, the escalation is recorded as pending and retried until it succeeds;
-  - a local `sdlc/board/<ISO-week>.md` is always written too.
+  - a local copy, `sdlc/board/escalations.md`, is always written too, grouped by sprint.
 - **Counting:** a tester-rejected task counts as escalated. The report also shows it in its own column, "passed by
   agents, rejected by human".
 
@@ -647,7 +653,7 @@ HHHHHHHHCHHCHHHHHHHH
 7. **Intake in other languages** is untested. Test it with 2–3 Hindi or Hindi–English requests.
 8. **Many small commits** on `ultron/state`. This is intended, as the audit trail. They can be squashed at merge.
 9. **Differences from the intent**, recorded here; `intent.md` itself is unchanged:
-   - the escalation board is Jira;
+   - the escalation board is Jira, using the board's own 2-week sprints instead of the intent's 5-day sprint;
    - "ticket" becomes "requirement";
    - the attempt limit is configurable;
    - ultron is injected into coding agents, rather than being "a CLI or minimal web page".
