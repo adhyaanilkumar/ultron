@@ -44,6 +44,7 @@ confirm or change it during this review.
 | D21 | **The host learns ultron's state when a session starts.** The plugin's SessionStart hook reads ultron's cache, with no model involved, and adds a one-line summary to the new session: items waiting on the user, running ultron agents, new escalations (§9.1). | Confirmed (2026-11-10) |
 | D22 | **ultron agents get context built by the engine, per role** (§11.3). That includes the target repo's `CLAUDE.md` and `AGENTS.md`, passed **as data** (conventions to follow unless they conflict with ultron's rules), never as settings. Repo hooks, permissions and MCP servers are still never loaded. It's on by default for repos set up with `/ultron:init`, and off in evaluation runs. | Confirmed (2026-11-10) |
 | D23 | **Research-assisted intake: one read-only intake scout.** Before the intake agent drafts, a scout reads the target codebase and the repo's past requirements (no web, no shell, no Jira in V0) and writes facts with sources to `research.md`. The intake agent uses it only to ask sharper questions, fill "Affected users and systems" and flag possible duplicates. Problem and Proposed outcome stay in the user's words. Switch: `intake_research = "off" \| "local"`, default `local`, forced off in evaluation runs (§7.1). Researched 2026-11-10. | Confirmed (2026-11-10) |
+| D24 | **ultron uses deployment and maintenance infrastructure but never builds it on its own.** It uses them through a small contract in `ultron.toml` (§10.1): only `test` is required, and `deploy` and `rollback` are optional but come as a pair. If a repo needs infrastructure built, that's an ordinary requirement through the pipeline, with a human-steps checklist and a cost table (§7.3). Accounts, credentials, payments and provisioning are always done by the human. Researched 2026-11-10. | Confirmed (2026-11-10) |
 
 Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and ultron agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
@@ -71,6 +72,168 @@ claude   (calls ultron_merge, ultron_deploy)  → a confirmation form for each, 
 ```
 
 ultron agents run in the background between these steps. Closing Claude Code doesn't stop them.
+
+---
+
+## 2a. One end-to-end flow (sequence diagrams)
+
+**Example:** a single requirement on a sample web app, from the user's words to a deployed release, and then to a
+regression that maintain catches. Everything is set to its defaults. The three diagrams continue one another. The
+human decides only at the forms (shown as notes).
+
+### Part 1: from the user's words to an approved spec and tasks
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant H as Host agent (Claude Code + ultron plugin)
+    participant M as ultron MCP server
+    participant E as Engine and runner
+    participant SC as Intake scout
+    participant IN as Intake agent
+    participant SP as Spec agent
+    participant DC as Decomposition agent
+    participant G as Target repo (ultron/state branch)
+
+    Note over H,M: SessionStart hook: ultron ready, nothing waiting
+    U->>H: customers keep phoning about orders, let them see order status
+    H->>M: ultron_submit(text)
+    M->>E: register R-20261110-a3f2, start runner (detached)
+    M-->>H: id R-20261110-a3f2, intake started
+    E->>G: commit request.md + event submitted
+    E->>SC: read code and past requirements (read-only)
+    SC-->>E: research.md (facts with sources)
+    E->>IN: request.md + template + research.md
+    IN-->>E: draft intent.md + 2 questions
+    H->>M: ultron_status
+    M-->>H: 2 intake questions
+    H->>U: only logged-in users? delivery dates too?
+    U->>H: logged in only, yes dates
+    H->>M: ultron_answer(answers)
+    E->>IN: answers
+    IN-->>E: final intent.md
+    E->>G: commit intent.md, intake.json, events
+    H->>M: ultron_review(intent)
+    M->>U: form - request, draft and research side by side
+    Note over U,M: intent gate (human) - Approve
+    U-->>M: Approve
+    M->>E: gate decided, restart runner
+    E->>SP: intent.md + research.md + repo CLAUDE.md + codebase (read-only)
+    SP-->>E: spec.md (proposes v1.1.0 minor) + 1 question
+    H->>M: ultron_review(spec)
+    M->>U: form - spec, question, version
+    Note over U,M: spec gate (human) - answer question, Approve v1.1.0
+    U-->>M: Approve
+    E->>DC: intent.md + spec.md
+    DC-->>E: tasks.md + tasks.json (T1 API story, T2 UI feature needs T1)
+    Note over E: tasks gate is auto by default - graph valid, passes
+    E->>G: commit spec.md, tasks, decisions, events
+```
+
+### Part 2: one task through plan, attempts, monitoring, a stop, and the result gate
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant H as Host agent
+    participant M as ultron MCP server
+    participant E as Engine (broker, limits, permission callback)
+    participant DV as Developer agent (T1)
+    participant TS as Testing agent (T1)
+    participant SP as Spec agent
+    participant J as Jira (epic AD-378)
+    participant G as Target repo
+
+    E->>G: worktree ultron/R-a3f2/T1 from the base commit
+    E->>DV: spec + T1 criteria + repo CLAUDE.md
+    DV-->>E: plan.md
+    H->>M: ultron_review(plan T1)
+    M->>U: form - plan.md
+    Note over U,M: plan gate (human) - Approve
+    U-->>M: Approve
+    rect rgb(235, 235, 235)
+    Note over E,TS: Attempt 1 of max_attempts 3
+    E->>DV: code to the approved plan
+    DV->>E: ask(spec, "status names: shipped or dispatched?")
+    E->>SP: spec + question (counted, logged)
+    SP-->>E: shipped (spec section 3)
+    E-->>DV: answer as data
+    DV-->>E: diff
+    E->>TS: criteria + diff (not the developer's reasoning)
+    TS-->>E: tests written and run
+    E->>E: rerun the agent's tests + repo test command
+    Note over E: 1 failing test - attempt 1 failed
+    end
+    rect rgb(235, 235, 235)
+    Note over E,TS: Attempt 2 of 3 - engine test output sent as feedback
+    E->>DV: failing output + plan
+    U->>H: what are the agents doing?
+    H->>M: ultron_monitor(since)
+    M-->>H: developer T1 editing api.py, run pytest
+    Note over DV: starts editing files outside its task
+    H->>M: ultron_stop(T1, "editing unrelated files", then=retry)
+    M->>E: stop
+    E->>DV: interrupt, kill process tree
+    Note over E: attempt 2 counted as failed, reason recorded
+    end
+    rect rgb(235, 235, 235)
+    Note over E,TS: Attempt 3 of 3 - stop reason sent as feedback
+    E->>DV: plan + stop reason
+    DV-->>E: diff
+    E->>TS: criteria + diff
+    TS-->>E: tests
+    E->>E: rerun tests - all pass
+    end
+    H->>M: ultron_review(result T1)
+    M->>U: form - plan, test evidence, diff
+    Note over U,M: result gate (human) - Approve
+    U-->>M: Approve
+    E->>G: commit attempt reports, decisions, events
+    Note over E,J: If attempt 3 had also failed - T1 escalated, a Story created in AD-378 in the active 2-week sprint, T2 blocked
+```
+
+### Part 3: merge, deploy, and maintain catching a regression
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant H as Host agent
+    participant M as ultron MCP server
+    participant E as Engine
+    participant G as Target repo
+    participant D as Deploy and rollback scripts (user-owned)
+    participant MT as Scheduled maintain
+    participant MA as Maintenance agent
+
+    Note over E: T2 ran the same loop after T1, now approved
+    H->>M: ultron_merge(R-a3f2)
+    M->>U: form - merge T1 then T2 into main
+    Note over U,M: merge gate (always human) - Confirm
+    U-->>M: Confirm
+    E->>G: merge in dependency order + sdlc folder
+    H->>M: ultron_deploy
+    M->>U: form - release v1.1.0, last rollback rehearsal date
+    Note over U,M: deploy gate (always human) - Confirm
+    U-->>M: Confirm
+    E->>D: deploy with ULTRON_VERSION, ULTRON_SHA
+    D-->>E: ok, then smoke passes
+    E->>G: tag v1.1.0, releases/v1.1.0.md, events
+    loop every 30 minutes
+    MT->>MT: run test + smoke, read new log lines (no model)
+    end
+    Note over MT: new error in the log - fingerprint not seen before
+    MT->>MA: evidence + release + tasks in v1.1.0
+    MA-->>MT: intent.md (bug, links v1.1.0 and T1)
+    MT->>E: new requirement R-20261111-0c7e
+    Note over E: maintain gate is auto by default - enters the pipeline at the spec step
+    Note over H,M: next SessionStart - ultron: 1 new maintenance finding (R-0c7e)
+    H->>M: ultron_status
+    M-->>H: R-0c7e - spec in progress, may propose rollback
+    Note over U: User decides whether to roll back (ultron_rollback, form, always human)
+```
 
 ---
 
@@ -113,7 +276,9 @@ merged on its own.
 
 **Setup**
 - **FR1** `/ultron:init` (the `ultron_init` tool) prepares the repo open in the host agent:
-  - writes `ultron.toml`;
+  - writes `ultron.toml`, after detecting the contract's commands (§10.1) from the Makefile, `package.json`,
+    `pyproject.toml` or existing CI. It asks only about what it can't find, leaves `deploy` blank by default, and
+    never creates infrastructure;
   - gitignores `.ultron/`;
   - creates the `ultron/state` branch;
   - offers to register scheduled maintenance (§15).
@@ -161,8 +326,15 @@ merged on its own.
 - **FR14** `ultron_merge` (always human-confirmed) merges approved task branches into the target branch in dependency
   order, together with the requirement's `sdlc/` folder. It skips tasks with an escalated dependency and stops on a
   conflict.
-- **FR15** `ultron_deploy` (always human-confirmed) runs the configured deploy script, records the release (version,
-  commit, time, who, requirements and tasks) and tags `v<version>`.
+- **FR15** `ultron_deploy` (always human-confirmed) records the release (version, commit, time, who, requirements
+  and tasks) and tags it.
+  - **If `deploy` is configured,** it runs the deploy script with `ULTRON_VERSION`, `ULTRON_SHA` and `ULTRON_ENV`, then
+    runs `smoke`.
+  - **If `deploy` isn't configured,** it only records a release marker. Nothing runs, and maintain checks that commit.
+  - **Rollback rehearsal:** the form shows when a rollback was last rehearsed (`rollback_rehearsed_at`). If that's
+    older than `rollback_rehearsal_days` (default 30), the form asks the user to rehearse and confirm first.
+- **FR15a** `ultron_rollback` (always human-confirmed, locked) runs the `rollback` command with the previous
+  release's commit, then `smoke`, and records it. Maintain may propose a rollback in an intent, but never runs one.
 
 **Records, caps and status**
 - **FR16** Every gate decision is an event: who (the git identity, or `auto`), when, the channel (form or terminal fallback), the
@@ -249,7 +421,8 @@ Codex's own way of giving instructions in place of the skill. The core never cha
 | `ultron_settings` | The gate settings and `max_attempts` in force | No (read) |
 | `ultron_review` | Opens the review form for something waiting at a gate | **The decision is the human's**, through the form |
 | `ultron_merge` | Merges a requirement's approved work | **Human-confirmed** through a form. Locked. |
-| `ultron_deploy` | Runs the deploy script and records the release | **Human-confirmed** through a form. Locked. |
+| `ultron_deploy` | Runs the deploy script, or only records a release marker if none is set, and records the release | **Human-confirmed** through a form. Locked. |
+| `ultron_rollback` | Runs the rollback command to the previous release | **Human-confirmed** through a form. Locked. |
 | `ultron_eval` | Starts an evaluation run in the background (§16) | **Human-confirmed:** the form shows the usage and time estimate first |
 
 **No tool takes a decision as an argument.** For example, `ultron_review(id)` doesn't accept `approve=true`. The
@@ -302,6 +475,29 @@ pass one.
 Requirement ids are collision-free, `R-<yyyymmdd>-<4 hex>` (for example `R-20261109-a3f2`), so team sync can come
 later without renaming anything. This spec writes `R<n>` for short.
 
+
+### 7.3 Building deployment and maintenance infrastructure (D24)
+ultron never sets up infrastructure on its own. If a repo needs it ("add deployment for this app", "add daily
+backups"), the user submits it as an **ordinary requirement**. It goes through intake, spec, tasks, plans, gates,
+attempts and the user's merge like any other. It produces scripts, CI workflows and config files in the repo, as
+social-grid's were built.
+- **Required spec content:** for these requirements, the spec agent must add two sections to `spec.md`:
+  - a **human-steps checklist**: accounts, purchases, secrets and tokens, DNS, the first provisioning run, required
+    reviewers;
+  - a **cost table** in INR a month, checked against the budget in CLAUDE.md.
+
+  The `spec` gate approves both.
+- **Tests are rehearsals:** a dry run (`ULTRON_DRY_RUN=1`, as social-grid used `REHEARSAL=1`) and a local run, never
+  against production.
+- **Never done by an ultron agent:**
+  - creating accounts, or paying for or buying anything;
+  - creating or storing tokens and keys;
+  - provisioning anything that costs money;
+  - running a production deploy, rollback or restore without the user's form;
+  - changing gate settings.
+
+  These always stay with the human.
+
 ---
 
 ## 8. Human approvals
@@ -315,7 +511,7 @@ later without renaming anything. This spec writes `R<n>` for short.
 | `result` | Each tested task: diff, plan and evidence | human | yes |
 | `escalation` | Confirm before a Jira ticket is created | auto | yes (an extra human gate) |
 | `maintain` | Accept a maintenance intent | auto | yes (an extra human gate) |
-| `merge`, `deploy` | Merging, and running the deploy | human | **no: locked**, because the intent requires a human action |
+| `merge`, `deploy`, `rollback` | Merging, running the deploy, rolling back | human | **no: locked**, because the intent requires a human action |
 
 **Choosing the settings**
 - **Per repo:** in `ultron.toml`. **Per requirement:** at submit.
@@ -449,9 +645,28 @@ server and the SessionStart hook only read those records.
 | `sdlc/requirements/R<n>/` | `request.md`, `intent.md`, `intake.json`, `events.jsonl`, `spec.md`, `tasks.md`, `decisions.md`, `tasks/T<k>/plan.md`, attempt reports and test output | Yes, on `ultron/state`; merged with the code |
 | `sdlc/releases/v<version>.md` | What each release contains | Yes |
 | `.ultron/` | `state.db` (cache), agent transcripts, locks, the maintain log offset | No |
-| `ultron.toml` | Commands (test, smoke, deploy), log path, caps, `max_attempts`, gates, agent adapter and models, parallelism, Jira | Yes |
+| `ultron.toml` | The contract (§10.1), caps, `max_attempts`, gates, agent adapter and models, parallelism, Jira | Yes |
 | Work folder (default `C:\git\.ultron-work`, no spaces) | Task worktrees and the state worktree | No |
 | ultron home (default `C:\git\.ultron`) | Evaluation workspaces, hidden tests, reports, totals across repos | No |
+
+### 10.1 The deployment and maintenance contract (D24)
+The `[commands]`, `[deploy]` and `[maintain]` sections of `ultron.toml` are everything ultron needs from a repo's
+infrastructure:
+
+| Field | Required? | Meaning |
+|---|---|---|
+| `test` | **Yes** | The repo's full test command. Attempts and maintain use it. |
+| `smoke` | No | A quick check of a running build. Run after deploy and rollback, and by maintain. |
+| `deploy` | No | The deploy entry point. It receives `ULTRON_VERSION`, `ULTRON_SHA` and `ULTRON_ENV`, and supports `ULTRON_DRY_RUN=1` if possible. |
+| `rollback` | **Required if `deploy` is set** | Rolls back to the release whose commit it receives |
+| `tag_format` | No | Default `v{version}` |
+| `rollback_rehearsal_days` | No | Default 30 (FR15) |
+| `log_path` | No | A local log file for maintain to read |
+| `log_command` | No | A command that prints new log lines, e.g. `docker compose logs --since` on a server. It's user-owned, because it implies standing access. ultron runs it but never stores credentials for it. |
+| `maintain.interval` | No | Default 30 minutes. `/ultron:init` registers the schedule. |
+
+- **A repo with no deployment** (a library, or the evaluation's open-source repos) only needs `test`.
+- **Later:** environments (dev, staging, prod) and control bands (playbook Stage 6, `bands.yaml`).
 
 ---
 
@@ -572,6 +787,13 @@ afterwards.
 2. The user is logged in with a claude.ai account. ultron shows the plan type.
 3. No API key in the environment would override the subscription. If one is set, ultron refuses unless the user
    allows it explicitly.
+4. The contract works (§10.1). Every check here is read-only or a dry run:
+   - `test` and `smoke` run;
+   - `deploy` and `rollback` exist and can be executed, and are dry-run if they support `ULTRON_DRY_RUN=1`;
+   - `deploy` without `rollback` is an error;
+   - the log source can be read, and the fingerprinter parses a sample;
+   - the maintain schedule is registered;
+   - the rollback rehearsal isn't older than `rollback_rehearsal_days`.
 
 If a check fails, ultron stops and says how to fix it, for example `claude auth login`. ultron never reads or stores
 credentials.
@@ -581,7 +803,7 @@ credentials.
   to register it with Windows Task Scheduler. The detection itself is deterministic and uses no model.
 - **Checks:**
   - the full test command and the smoke command against the released commit;
-  - new lines in the configured log file.
+  - new lines from `log_path` or `log_command` (§10.1), on the schedule `maintain.interval`.
 - **Fingerprints:**
   - a failing test's fingerprint is its test id;
   - a log error's fingerprint is a hash of its exception type, its normalised message, and its top 3 `file:function`
@@ -732,10 +954,19 @@ HHHHHHHHCHHCHHHHHHHH
     is facts with sources, kept in a separate file. The intent's Problem and Proposed outcome are restricted to the
     user's words, and the gate shows which lines came from research. The evidence ("Ask or Assume?", 2026) is from
     a summary page, not the full paper.
+15. **The deploy and rollback scripts are arbitrary commands.** They're committed and reviewed in the repo, run
+    only after the user confirms a form, and their output is logged.
+16. **`log_command` can imply standing server access.** It's optional and user-owned, and ultron never stores its
+    credentials. social-grid deliberately avoided standing SSH access.
+17. **Untested rollbacks.** `/ultron:doctor` warns, and the deploy form asks for a fresh rehearsal when the last one
+    is old.
+18. **Two approvals for one release.** If the deploy script triggers a CI release workflow with its own required
+    reviewer (as social-grid's does), the user approves twice. That's deliberate defence in depth.
 
 ## 20. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
   billing, production monitoring, and model training.
+- **ultron provisioning or configuring infrastructure on its own** (§7.3). It only uses the contract (§10.1).
 - **Later versions:** everything in `sdlc/backlog.md`.
 
 ## 21. How V0 is proven (intent §9)
@@ -752,6 +983,11 @@ HHHHHHHHCHHCHHHHHHHH
   - merge and deploy require a form;
   - the gate fallback refuses without an interactive terminal;
   - the guard hook blocks gate and `bin/` commands from the host model's shell.
+- **Contract tests:**
+  - a repo with only `test` works end to end, and deploy records a release marker;
+  - `deploy` without `rollback` fails the doctor check;
+  - deploy, rollback and doctor pass the right variables and dry-run flag;
+  - the rehearsal-age prompt appears when it's due.
 - **Context and session-start tests:**
   - each role's context contains exactly its listed files;
   - repo instructions are included when the switch is on, left out in evaluation runs, and recorded with a hash;
