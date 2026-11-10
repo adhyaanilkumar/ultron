@@ -29,6 +29,9 @@ When Claude makes the same mistake twice, the correction goes under "Things Clau
 - **Where:** site `adhyasworkspace-45421657.atlassian.net`, project **AD** (adhya-work). Epic **AD-378** is ultron, and **AD-379** is social-grid. Sprints are 2 weeks and are managed on the board, not by us.
 - **When:** after the owner approves `tasks.md`, file each task under its epic as a Story, Feature or Bug, and put the Jira key next to the task in `tasks.md`.
 
+## Talking to the owner
+Keep explanations within 280 characters. Go longer only when the content needs it. Too much at once overwhelms.
+
 ## Verifying your work
 Run build, lint and test before reporting anything done, and paste the result lines. Never skip, weaken or delete a failing test.
 
