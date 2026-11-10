@@ -57,6 +57,13 @@ Decided 2026-11-09 as the backup to the engine broker (spec D18): agents message
 with the A2A (Agent2Agent) protocol. Use it only if brokered messaging proves too limiting. Before adopting it, work
 out how gates, limits and the audit trail would still be enforced, because the broker currently guarantees all three.
 
+## Hosted HTTP MCP server
+- **What:** one shared ultron server that hosts connect to by URL, instead of each user running their own copy (spec
+  §5.3).
+- **Why later:** useful for teams sharing one instance. It needs a server, a domain, user login and access control,
+  and its monthly cost must be stated in INR and approved against the ₹12,000 cap first.
+- **Depends on:** team sync and team roles.
+
 ## Team roles and permissions
 Decided 2026-11-09 to keep V0 single-user (spec D19). Later, different people could hold the human roles (architect,
 developer, tester), and each gate would check that the person deciding has that role. This builds on team sync above.

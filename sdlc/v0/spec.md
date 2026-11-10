@@ -46,6 +46,7 @@ confirm or change it during this review.
 | D23 | **Research-assisted intake: one read-only intake scout.** Before the intake agent drafts, a scout reads the target codebase and the repo's past requirements (no web, no shell, no Jira in V0) and writes facts with sources to `research.md`. The intake agent uses it only to ask sharper questions, fill "Affected users and systems" and flag possible duplicates. Problem and Proposed outcome stay in the user's words. Switch: `intake_research = "off" \| "local"`, default `local`, forced off in evaluation runs (§7.1). Researched 2026-11-10. | Confirmed (2026-11-10) |
 | D24 | **ultron uses deployment and maintenance infrastructure but never builds it on its own.** It uses them through a small contract in `ultron.toml` (§10.1): only `test` is required, and `deploy` and `rollback` are optional but come as a pair. If a repo needs infrastructure built, that's an ordinary requirement through the pipeline, with a human-steps checklist and a cost table (§7.3). Accounts, credentials, payments and provisioning are always done by the human. Researched 2026-11-10. | Confirmed (2026-11-10) |
 | D25 | **Model and effort per task, raised on failure.** The decomposition agent scores each task's complexity with a fixed rubric and picks a starting **rung** (a model plus effort level, from Haiku 5.5 medium up to Opus 5.5 max). Every counted failed attempt moves the task up one rung. Fable is never used unless the owner approves its cost for a requirement (§11.4). Researched 2026-11-10. | Proposed |
+| D26 | **ultron is distributed, not hosted.** Each user runs their own copy locally: Claude Code starts the MCP server over stdio, with the user's own Claude login. The ultron GitHub repo is also a Claude Code plugin marketplace, and the plugin runs a pinned release through `uvx`. A version tag triggers a GitHub Actions release. A hosted HTTP MCP server is in the backlog (§5.3). | Confirmed (2026-11-10) |
 
 Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and ultron agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
@@ -407,6 +408,35 @@ This is how ultron is injected into Claude Code. Installing the plugin is the wh
 Codex's own way of giving instructions in place of the skill. The core never changes per host. Only the package does.
 
 ---
+
+### 5.3 Distribution and releases (D26)
+**ultron runs on each user's own machine.** There's no ultron server to host.
+- Claude Code starts ultron's MCP server as a local process and talks to it over **stdio**. The detached runner
+  (§9) is a local process too.
+- Each user runs their own copy, with **their own Claude login** and their own repos. Anyone can install it, but
+  people don't share one running instance (that's team sync, in the backlog).
+- **Cost: ₹0.** No hosting, no domain, no server login.
+
+**How a user installs it:**
+1. In Claude Code: `/plugin marketplace add <owner>/ultron`, then `/plugin install ultron`. The ultron repo carries
+   `.claude-plugin/marketplace.json` and the plugin folder, so the repo itself is the marketplace.
+2. The plugin's MCP config starts the server with
+   `uvx --from git+https://github.com/<owner>/ultron@v<version> ultron mcp`. `uv` fetches that exact tagged release
+   and its locked dependencies, so there's no separate Python install step beyond having `uv`.
+3. `/ultron:doctor` checks the rest (§14), then `/ultron:init` sets up a target repo.
+
+**How a release is made:**
+- ultron's own versions follow the same rule it applies to target repos (§13) and go through the playbook stages.
+- Pushing a tag `v<version>` runs a GitHub Actions workflow: `make build`, `make lint`, `make test`, then a GitHub
+  release with notes from `sdlc/v<version>/`. The plugin's pinned version is bumped in the same release commit.
+- Merging to `main` stays human, through a PR. GitHub Actions is free for public repos, so this costs ₹0.
+- Publishing to PyPI comes later, once the package is stable.
+
+**Updating:** the user runs `/plugin update ultron`. A new release never changes in-flight requirements: each event
+records the ultron version that wrote it, and a newer ultron reads older event logs.
+
+**Not in V0:** a hosted HTTP MCP server that hosts connect to by URL. It would need a server, a domain, user login
+and monthly hosting (backlog).
 
 ## 6. MCP tools
 
@@ -1073,6 +1103,8 @@ HHHHHHHHCHHCHHHHHHHH
   - `deploy` without `rollback` fails the doctor check;
   - deploy, rollback and doctor pass the right variables and dry-run flag;
   - the rehearsal-age prompt appears when it's due.
+- **Distribution tests:** a clean machine with only Claude Code and `uv` installs the plugin from the marketplace,
+  `/ultron:doctor` passes, and an event log written by the previous release is still read correctly.
 - **Context and session-start tests:**
   - each role's context contains exactly its listed files;
   - repo instructions are included when the switch is on, left out in evaluation runs, and recorded with a hash;
