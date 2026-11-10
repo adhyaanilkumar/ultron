@@ -452,32 +452,6 @@ server and the SessionStart hook only read those records.
 - **Adapter choice:** `ultron.toml` chooses the adapter and the model **per role**. For example, a later version could
   run the developer role on Codex and the spec role on Claude.
 
-### 11.3 What each ultron agent is told (D22)
-The **engine** builds every ultron agent's context from files, the same way every time. It never depends on what a
-host model chose to pass on, unlike a Claude Code subagent. Every prompt is logged (FR17), so it can be checked
-afterwards.
-
-| Role | Context |
-|---|---|
-| Intake | `request.md` and the intent template |
-| Spec | `intent.md`, repo instructions, and read access to the codebase |
-| Decomposition | `intent.md`, the approved `spec.md`, and repo instructions |
-| Developer | `spec.md`; its task and acceptance criteria from `tasks.md`; the approved `plan.md`; the files its dependencies changed; repo instructions. On a retry, also the engine's failing test output, any stop reason, and the user's comments from the gate form. |
-| Testing | Its task's acceptance criteria, the diff, and repo instructions. It deliberately doesn't get the developer's reasoning, so it judges the change with fresh eyes. |
-| Maintenance | The failure evidence, the release, the tasks in that release, and repo instructions |
-
-**Repo instructions.**
-- **What's read:** the target repo's `CLAUDE.md` (root and nested) and `AGENTS.md`. This is the team's knowledge of
-  build commands, conventions and known mistakes, which the playbook says belongs in those files.
-- **How it's passed:** inside the prompt, as data, under a heading that says: *"Project conventions from the
-  repository. Follow them unless they conflict with ultron's rules, the approved spec or the approved plan."* It never
-  goes in as Claude Code settings.
-- **Never loaded from the repo:** hooks, permission settings and MCP servers. A repo can inform ultron agents but can't
-  control them. ultron's rules and the engine's checks always win.
-- **The switch:** `repo_instructions` in `ultron.toml`. It defaults to `true` for repos set up with `/ultron:init`.
-- **Evaluation runs force it to `false`** (§16), so the benchmark measures ultron itself and stays reproducible.
-- **What was included is recorded** with each call (file paths and a content hash).
-
 ### 11.2 How ultron agents communicate (D17)
 - **Through files first.** Most handoffs are artifacts, as in the playbook: the developer reads the approved plan,
   and the testing agent's failing output goes back to the developer as the next attempt's input.
@@ -508,6 +482,32 @@ afterwards.
   So mixing Claude- and Codex-based ultron agents doesn't change how they communicate.
 - **Backup (D18):** direct peer-to-peer messaging, e.g. the A2A protocol, is in the backlog, for use only if brokered
   messaging proves too limiting.
+
+### 11.3 What each ultron agent is told (D22)
+The **engine** builds every ultron agent's context from files, the same way every time. It never depends on what a
+host model chose to pass on, unlike a Claude Code subagent. Every prompt is logged (FR17), so it can be checked
+afterwards.
+
+| Role | Context |
+|---|---|
+| Intake | `request.md` and the intent template |
+| Spec | `intent.md`, repo instructions, and read access to the codebase |
+| Decomposition | `intent.md`, the approved `spec.md`, and repo instructions |
+| Developer | `spec.md`; its task and acceptance criteria from `tasks.md`; the approved `plan.md`; the files its dependencies changed; repo instructions. On a retry, also the engine's failing test output, any stop reason, and the user's comments from the gate form. |
+| Testing | Its task's acceptance criteria, the diff, and repo instructions. It deliberately doesn't get the developer's reasoning, so it judges the change with fresh eyes. |
+| Maintenance | The failure evidence, the release, the tasks in that release, and repo instructions |
+
+**Repo instructions.**
+- **What's read:** the target repo's `CLAUDE.md` (root and nested) and `AGENTS.md`. This is the team's knowledge of
+  build commands, conventions and known mistakes, which the playbook says belongs in those files.
+- **How it's passed:** inside the prompt, as data, under a heading that says: *"Project conventions from the
+  repository. Follow them unless they conflict with ultron's rules, the approved spec or the approved plan."* It never
+  goes in as Claude Code settings.
+- **Never loaded from the repo:** hooks, permission settings and MCP servers. A repo can inform ultron agents but can't
+  control them. ultron's rules and the engine's checks always win.
+- **The switch:** `repo_instructions` in `ultron.toml`. It defaults to `true` for repos set up with `/ultron:init`.
+- **Evaluation runs force it to `false`** (§16), so the benchmark measures ultron itself and stays reproducible.
+- **What was included is recorded** with each call (file paths and a content hash).
 
 ---
 
