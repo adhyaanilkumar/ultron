@@ -41,6 +41,8 @@ confirm or change it during this review.
 | D18 | **Direct peer-to-peer messaging between agents (e.g. the A2A protocol) is a backup**, kept in `sdlc/backlog.md` and used only if brokered messaging proves too limiting. | Confirmed (2026-11-09) |
 | D19 | **V0 is single-user.** One person plays every human role (requester, architect, developer, tester) on their own machine. Team features (team sync, separate people per role, permissions, the multi-project registry) are in `sdlc/backlog.md`. | Confirmed (2026-11-09) |
 | D20 | **The host agent monitors and can stop ultron agents.** It sees which ultron agents are running, what each is doing step by step, its progress and its usage. If one goes out of line, the host can **stop** it, and then retry, hold, or escalate the task to Jira. The engine also stops agents automatically on clear violations. Stopping can only end or pause work, never advance it (§9.1). | Confirmed (2026-11-09) |
+| D21 | **The host learns ultron's state when a session starts.** The plugin's SessionStart hook reads ultron's cache, with no model involved, and adds a one-line summary to the new session: items waiting on the user, running ultron agents, new escalations (§9.1). | Confirmed (2026-11-10) |
+| D22 | **ultron agents get context built by the engine, per role** (§11.3). That includes the target repo's `CLAUDE.md` and `AGENTS.md`, passed **as data** (conventions to follow unless they conflict with ultron's rules), never as settings. Repo hooks, permissions and MCP servers are still never loaded. It's on by default for repos set up with `/ultron:init`, and off in evaluation runs. | Confirmed (2026-11-10) |
 
 Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and ultron agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
@@ -218,6 +220,7 @@ This is how ultron is injected into Claude Code. Installing the plugin is the wh
 | Slash commands | `/ultron:init`, `/ultron:status`, `/ultron:submit`, `/ultron:review`, `/ultron:monitor`, `/ultron:stop`, `/ultron:doctor`, `/ultron:eval` |
 | Skill | Teaches the host model how ultron works: the requirement lifecycle, what each gate means, and that **only the human approves** (through the form, or by running the fallback command themselves) |
 | Guard hook | A PreToolUse hook that blocks the host model's own shell calls to `ultron gate`, the `bin/` entry points, and git operations on `ultron/state`. The block message tells the model to ask the human. |
+| SessionStart hook | When a Claude Code session starts, it reads ultron's cache (fast, no model) and adds one line of context, e.g. *"ultron: 2 plans waiting for your review · 1 ultron agent running (R-…a3f2/T2, attempt 2/3) · 1 new escalation (AD-391)"*. If ultron isn't set up for the repo, it adds nothing. |
 
 **Other hosts later.** Codex is first (backlog): the same MCP server, registered through Codex's MCP config, plus
 Codex's own way of giving instructions in place of the skill. The core never changes per host. Only the package does.
@@ -373,6 +376,11 @@ ultron agent later reports exactly like a Claude one:
 - **Live push, if the host supports it:** ultron also offers activity as an MCP resource that the host can subscribe
   to, and sends progress notifications. Whether Claude Code shows these is checked in the first task. Polling with
   `since` always works.
+- **At the start of every session (D21):** the plugin's SessionStart hook gives the host a one-line summary of what
+  happened while it was closed, so it can tell the user without being asked.
+
+**The host never watches ultron agents directly.** Agents write activity and events through the engine. The MCP
+server and the SessionStart hook only read those records.
 
 **Stopping an ultron agent that goes out of line.**
 `ultron_stop(task, reason, then=retry|hold|escalate)` (also `/ultron:stop`) lets the host end a running ultron agent:
@@ -437,12 +445,38 @@ ultron agent later reports exactly like a Claude one:
   - The SDK's permission callback lets the engine check **every tool call during the run**, deterministically. For
     example, it denies edits outside the task's worktree, git push, merge or branch switching, and web access.
   - The target repo's own Claude settings, hooks and MCP servers are **not** loaded, because target repos may be
-    untrusted.
+    untrusted. Its written instructions reach the agent as data instead (§11.3).
   - After every call, the engine also checks the diff itself.
 - **Fallback adapter: `claude -p`.** It's used if the first task finds that the SDK can't run on the subscription.
   The same rules are enforced through its flags.
 - **Adapter choice:** `ultron.toml` chooses the adapter and the model **per role**. For example, a later version could
   run the developer role on Codex and the spec role on Claude.
+
+### 11.3 What each ultron agent is told (D22)
+The **engine** builds every ultron agent's context from files, the same way every time. It never depends on what a
+host model chose to pass on, unlike a Claude Code subagent. Every prompt is logged (FR17), so it can be checked
+afterwards.
+
+| Role | Context |
+|---|---|
+| Intake | `request.md` and the intent template |
+| Spec | `intent.md`, repo instructions, and read access to the codebase |
+| Decomposition | `intent.md`, the approved `spec.md`, and repo instructions |
+| Developer | `spec.md`; its task and acceptance criteria from `tasks.md`; the approved `plan.md`; the files its dependencies changed; repo instructions. On a retry, also the engine's failing test output, any stop reason, and the user's comments from the gate form. |
+| Testing | Its task's acceptance criteria, the diff, and repo instructions. It deliberately doesn't get the developer's reasoning, so it judges the change with fresh eyes. |
+| Maintenance | The failure evidence, the release, the tasks in that release, and repo instructions |
+
+**Repo instructions.**
+- **What's read:** the target repo's `CLAUDE.md` (root and nested) and `AGENTS.md`. This is the team's knowledge of
+  build commands, conventions and known mistakes, which the playbook says belongs in those files.
+- **How it's passed:** inside the prompt, as data, under a heading that says: *"Project conventions from the
+  repository. Follow them unless they conflict with ultron's rules, the approved spec or the approved plan."* It never
+  goes in as Claude Code settings.
+- **Never loaded from the repo:** hooks, permission settings and MCP servers. A repo can inform ultron agents but can't
+  control them. ultron's rules and the engine's checks always win.
+- **The switch:** `repo_instructions` in `ultron.toml`. It defaults to `true` for repos set up with `/ultron:init`.
+- **Evaluation runs force it to `false`** (§16), so the benchmark measures ultron itself and stays reproducible.
+- **What was included is recorded** with each call (file paths and a content hash).
 
 ### 11.2 How ultron agents communicate (D17)
 - **Through files first.** Most handoffs are artifacts, as in the playbook: the developer reads the approved plan,
@@ -543,6 +577,7 @@ credentials.
   ultron home.
 - **The run:** each instance becomes a requirement whose `intent.md` is the raw issue text. The gate preset is
   `unattended`, and the report lists the gate settings used. No Jira tickets are created unless `--jira` is given.
+  `repo_instructions` is forced off, so the open-source repos' own instruction files don't affect the result (§11.3).
 - **Hidden tests:**
   - each repo is rebuilt from the pre-fix commit with no history, so `git log` can't reveal the fix;
   - the hidden tests live only in the ultron home;
@@ -664,6 +699,9 @@ HHHHHHHHCHHCHHHHHHHH
 12. **Stopping from text in the repo.** Untrusted repo text could push the host model to stop agents
     unnecessarily. The harm is limited, because stopping only pauses work and every stop is recorded and visible.
     The default `hold` means nothing is lost.
+13. **Repo instructions could be wrong or hostile.** A repo's `CLAUDE.md` might give bad advice, or contain text
+    aimed at the agent. It's passed only as data, ranked below ultron's rules, the approved spec and plan, and the
+    permission callback still blocks any disallowed action. It's off in evaluation runs.
 
 ## 20. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
@@ -682,6 +720,10 @@ HHHHHHHHCHHCHHHHHHHH
   - merge and deploy require a form;
   - the gate fallback refuses without an interactive terminal;
   - the guard hook blocks gate and `bin/` commands from the host model's shell.
+- **Context and session-start tests:**
+  - each role's context contains exactly its listed files;
+  - repo instructions are included when the switch is on, left out in evaluation runs, and recorded with a hash;
+  - the SessionStart hook prints the right summary from a sample cache, and nothing for a repo without ultron.
 - **Monitoring tests:**
   - both adapters produce the same activity events from a recorded stream;
   - the `since` cursor never skips or repeats an activity;
