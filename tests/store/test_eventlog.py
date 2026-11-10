@@ -286,6 +286,31 @@ def test_seq_out_of_order_is_corrupt(seqs: list[int], tmp_path: Path) -> None:
         EventLog(path).read()
 
 
+@pytest.mark.parametrize(
+    "bad", [b"[" * 100_000 + b"]" * 100_000, b'{"seq":' + b"1" * 5000 + b"}"]
+)
+def test_unparseable_middle_line_is_corrupt(bad: bytes, tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(_good_line(1) + bad + b"\n" + _good_line(3))
+    with pytest.raises(CorruptLogError) as exc:
+        EventLog(path).read()
+    assert exc.value.line_no == 2
+
+
+def test_unencodable_text_writes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    log.append(_new())
+    before = path.read_bytes()
+    bad = ev.NewEvent(
+        actor="engine", type="probe", requirement="R1", data={"p": "\udcff"}
+    )
+    with pytest.raises(ev.InvalidEventError):
+        log.append([_new(), bad])
+    assert path.read_bytes() == before
+    assert log.append(_new())[0].seq == 2
+
+
 def test_corrupt_last_line_blocks_append(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     path.write_bytes(_good_line(1) + b"not json\n")

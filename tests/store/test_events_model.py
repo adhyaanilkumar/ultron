@@ -258,6 +258,49 @@ def test_non_json_data_is_refused() -> None:
         ev.to_json_line(_event(data={"x": float("nan")}))
 
 
+def _deep(depth: int) -> dict[str, object]:
+    root: dict[str, object] = {}
+    node = root
+    for _ in range(depth):
+        child: dict[str, object] = {}
+        node["a"] = child
+        node = child
+    return root
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"data": {"path": "C:\\tmp\\\udcff.txt"}},  # lone surrogate in a value
+        {"data": {"\ud800": 1}},  # ... in a key
+        {"type": "probe\udcff"},  # ... in a top-level field
+        {"actor": "user:Ann\udcff <a@b.c>"},
+        {"extra": {"host": "\udcff"}},
+        {"data": _deep(100_000)},  # nesting too deep: RecursionError
+        {"data": {"n": 10**5000}},  # integer too long for str()
+    ],
+    ids=["value", "key", "type", "actor", "extra", "deep", "big-int"],
+)
+def test_unserialisable_event_raises_invalid_event_error(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ev.InvalidEventError):
+        ev.to_json_line(_event(**overrides))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "[" * 100_000 + "]" * 100_000,  # nesting too deep: RecursionError
+        '{"seq":' + "1" * 5000 + "}",  # integer too long: plain ValueError
+    ],
+    ids=["deep", "big-int"],
+)
+def test_unparseable_line_raises_invalid_event_error(line: str) -> None:
+    with pytest.raises(ev.InvalidEventError):
+        ev.from_json(line)
+
+
 def test_upgrade_renames_top_level_and_data_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

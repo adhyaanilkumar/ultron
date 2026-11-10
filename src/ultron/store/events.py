@@ -202,14 +202,22 @@ class Event:
 
 
 def to_json_line(event: Event) -> bytes:
-    """Serialise an event to one UTF-8 line ending in `\\n` (never `\\r\\n`)."""
+    """Serialise an event to one UTF-8 line ending in `\\n` (never `\\r\\n`).
+
+    Every failure raises `InvalidEventError`: values JSON can't hold (objects, NaN, cycles, nesting too deep,
+    integers too long) and text UTF-8 can't encode (a lone surrogate, e.g. from a surrogate-escaped path).
+    """
     try:
         text = json.dumps(
             event.to_dict(), ensure_ascii=False, separators=(",", ":"), allow_nan=False
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise InvalidEventError(f"event is not JSON-serialisable: {exc}") from exc
-    return text.encode("utf-8") + b"\n"
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise InvalidEventError(f"event text is not valid UTF-8: {exc}") from exc
+    return encoded + b"\n"
 
 
 def _rename(obj: dict[str, Any], old: str, new: str) -> None:
@@ -278,7 +286,8 @@ def from_json(line: str | bytes) -> Event:
             raise InvalidEventError(f"line is not UTF-8: {exc}") from exc
     try:
         obj = json.loads(line)
-    except json.JSONDecodeError as exc:
+    # ValueError covers JSONDecodeError and integers too long to convert; RecursionError, nesting too deep.
+    except (ValueError, RecursionError) as exc:
         raise InvalidEventError(f"line is not valid JSON: {exc}") from exc
     if not isinstance(obj, dict):
         raise InvalidEventError("an event line must be a JSON object")
