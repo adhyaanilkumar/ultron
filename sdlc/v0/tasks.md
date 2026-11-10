@@ -1,5 +1,5 @@
 # tasks.md — ultron V0
-Author: decomposition agent (Claude), for adhyaanilkumar. Cycle: V0. Status: **draft, awaiting review**. Date: 2026-11-10.
+Author: decomposition agent (Claude), for adhyaanilkumar. Cycle: V0. Status: **approved 2026-11-10** (owner: start with T01 only; Jira only for escalations; the gap choices in Concerns item 1 accepted as written). Date: 2026-11-10.
 Source: `spec.md` (approved 2026-11-10). Machine-readable copy: `tasks.json`.
 
 **Summary**

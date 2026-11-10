@@ -27,7 +27,7 @@ When Claude makes the same mistake twice, the correction goes under "Things Clau
 
 ## Tracking this project in Jira
 - **Where:** site `adhyasworkspace-45421657.atlassian.net`, project **AD** (adhya-work). Epic **AD-378** is ultron, and **AD-379** is social-grid. Sprints are 2 weeks and are managed on the board, not by us.
-- **When:** after the owner approves `tasks.md`, file each task under its epic as a Story, Feature or Bug, and put the Jira key next to the task in `tasks.md`.
+- **When:** only when a task fails or is rejected (escalation, as ultron does). File it under its epic as a Story, Feature or Bug, and put the Jira key next to the task in `tasks.md`. Decided by the owner 2026-11-10.
 
 ## Talking to the owner
 Keep explanations within 280 characters. Go longer only when the content needs it. Too much at once overwhelms.
