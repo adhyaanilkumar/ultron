@@ -43,6 +43,7 @@ confirm or change it during this review.
 | D20 | **The host agent monitors and can stop ultron agents.** It sees which ultron agents are running, what each is doing step by step, its progress and its usage. If one goes out of line, the host can **stop** it, and then retry, hold, or escalate the task to Jira. The engine also stops agents automatically on clear violations. Stopping can only end or pause work, never advance it (§9.1). | Confirmed (2026-11-09) |
 | D21 | **The host learns ultron's state when a session starts.** The plugin's SessionStart hook reads ultron's cache, with no model involved, and adds a one-line summary to the new session: items waiting on the user, running ultron agents, new escalations (§9.1). | Confirmed (2026-11-10) |
 | D22 | **ultron agents get context built by the engine, per role** (§11.3). That includes the target repo's `CLAUDE.md` and `AGENTS.md`, passed **as data** (conventions to follow unless they conflict with ultron's rules), never as settings. Repo hooks, permissions and MCP servers are still never loaded. It's on by default for repos set up with `/ultron:init`, and off in evaluation runs. | Confirmed (2026-11-10) |
+| D23 | **Research-assisted intake: one read-only intake scout.** Before the intake agent drafts, a scout reads the target codebase and the repo's past requirements (no web, no shell, no Jira in V0) and writes facts with sources to `research.md`. The intake agent uses it only to ask sharper questions, fill "Affected users and systems" and flag possible duplicates. Problem and Proposed outcome stay in the user's words. Switch: `intake_research = "off" \| "local"`, default `local`, forced off in evaluation runs (§7.1). Researched 2026-11-10. | Confirmed (2026-11-10) |
 
 Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and ultron agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
@@ -78,6 +79,7 @@ ultron agents run in the background between these steps. Closing Claude Code doe
 | Actor | Type | In ultron |
 |---|---|---|
 | Requester | Human | Describes the need or supplies `intent.md`, and approves an intake draft |
+| Intake scout | ultron agent | Reads the codebase and past requirements, read-only, and writes facts with sources to `research.md`. It proposes nothing. |
 | Intake agent | ultron agent | Turns free text into `intent.md` and asks up to 5 clarifying questions. It adds no scope and has no tools. |
 | Spec agent | ultron agent | Writes `spec.md` and proposes the version bump |
 | Architect | Human | The `spec` gate |
@@ -123,6 +125,9 @@ merged on its own.
   requirement id at once.
 - **FR3** The spec agent reads the intent and the target codebase (read-only) and writes `spec.md`. The spec has
   requirements, design, acceptance criteria, flagged concerns, and a proposed version bump with its reason.
+- **FR3a** The spec agent may raise **questions for the user** in `spec.md` (gaps that only appear once the code is
+  read, as the playbook's Stage 2 expects). They're listed at the `spec` gate, and the user's answers go back to the
+  spec agent with any change request.
 - **FR4** At the `spec` gate the user approves (optionally changing the version) or requests changes with comments.
   When changes are requested, the spec agent runs again. Nothing downstream starts before approval.
 
@@ -204,7 +209,7 @@ merged on its own.
 | `broker/` | Agent-to-agent messaging through the engine, and the agent-facing MCP tools (§11.2) |
 | `store/` | The event log (source of truth), the SQLite cache and the artifact writer |
 | `git/` | Worktrees, branches, merges and diffs |
-| `intake/` | The template check and the intake flow |
+| `intake/` | The template check, the intake scout and the intake flow |
 | `jira/` | The escalation client |
 | `maintain/` | Checks, the log reader, fingerprints and the intent writer |
 | `eval/` | Dataset prep, runs, grading and the report |
@@ -264,14 +269,30 @@ pass one.
 - **Template check (no AI):** a parser looks for the five headings (Problem, Proposed outcome, Affected users and
   systems, Constraints, Open questions). If they are all there, the file becomes `intent.md` unchanged and the spec
   step starts.
+- **Intake scout (D23):** runs first, when `intake_research = "local"` (the default outside evaluation).
+  - **Tools:** read-only Read, Grep and Glob over the target repo and `sdlc/requirements/*/{intent,spec}.md`. No
+    shell, no web, no MCP tools.
+  - **Limit:** about 15 tool calls or a token cap, both set in `ultron.toml`. A smaller model may be used.
+  - **Output:** it writes `research.md`, containing **facts only, each citing a path, line or requirement id**:
+    - the modules and files the request probably touches;
+    - what exists today;
+    - possible duplicates or related requirements;
+    - questions the code can't answer.
+  - **Forbidden:** it must not propose solutions or designs. That's the spec agent's job.
+  - **If it hits its limit or fails,** intake continues without research, and the event log records that.
 - **Intake agent:** used for free text, or a file that fails the check.
-  - It drafts the template, reusing the user's phrases.
+  - It drafts the template, reusing the user's phrases. **Problem and Proposed outcome come only from the user's words
+    and answers**, which a check enforces.
+  - It uses `research.md` only to:
+    - ask sharper questions;
+    - fill "Affected users and systems" with lines tagged `From codebase: … (source)`;
+    - add a `Possible duplicate of R-…` line under Open questions.
   - It asks at most 5 questions. The host model relays them, and `ultron_answer` returns the human's answers.
   - It adds no scope. Inferences are labelled "Assumption:", and unknowns go to Open questions.
   - Non-English input (e.g. Hindi or Hindi–English) gives an English intent that quotes the original lines.
   - It saves `intake.json`: the questions, answers, model and usage.
-- **The `intent` gate:** this applies only when the agent wrote the intent. The form shows the request and the draft
-  side by side. The engine records time to intent, and whether the draft was approved unchanged (the playbook's
+- **The `intent` gate:** this applies only when the agent wrote the intent. The form shows the request, the draft and
+  `research.md` side by side. The human can strike any research-sourced line. The engine records time to intent, and whether the draft was approved unchanged (the playbook's
   survival rate).
 - **Machine-written intents skip the intake agent:**
   - maintenance intents get the template check, then the `maintain` gate;
@@ -490,8 +511,9 @@ afterwards.
 
 | Role | Context |
 |---|---|
-| Intake | `request.md` and the intent template |
-| Spec | `intent.md`, repo instructions, and read access to the codebase |
+| Intake scout | The request, plus read-only access to the codebase and past requirements |
+| Intake | `request.md`, the intent template and `research.md` |
+| Spec | `intent.md`, `research.md` (as non-binding starting notes), repo instructions, and read access to the codebase |
 | Decomposition | `intent.md`, the approved `spec.md`, and repo instructions |
 | Developer | `spec.md`; its task and acceptance criteria from `tasks.md`; the approved `plan.md`; the files its dependencies changed; repo instructions. On a retry, also the engine's failing test output, any stop reason, and the user's comments from the gate form. |
 | Testing | Its task's acceptance criteria, the diff, and repo instructions. It deliberately doesn't get the developer's reasoning, so it judges the change with fresh eyes. |
@@ -590,7 +612,11 @@ credentials.
   - per task: pass rate after each attempt.
 - **Comparisons:**
   - a plain single-agent baseline on the same issues;
-  - optionally, a labelled `--intake auto` arm, to show whether structured intake raises the pass rate.
+  - optional labelled intake arms: `--intake auto` (intake agent) and `--intake auto+research` (scout plus intake
+    agent). Both use the same simulated answers to questions. The report shows the pass rate, the number of
+    questions, how often drafts survive unchanged, and tokens.
+  - Evaluation repos are rebuilt with no history, so the scout's search of past requirements finds nothing there.
+    The report says so.
 - **Approval before running:** before the pilot and before the full run, ultron prints a usage and duration estimate
   and waits for confirmation.
 
@@ -702,6 +728,10 @@ HHHHHHHHCHHCHHHHHHHH
 13. **Repo instructions could be wrong or hostile.** A repo's `CLAUDE.md` might give bad advice, or contain text
     aimed at the agent. It's passed only as data, ranked below ultron's rules, the approved spec and plan, and the
     permission callback still blocks any disallowed action. It's off in evaluation runs.
+14. **Research shaping the intent.** The scout could pull the intent towards what the code already does. Its output
+    is facts with sources, kept in a separate file. The intent's Problem and Proposed outcome are restricted to the
+    user's words, and the gate shows which lines came from research. The evidence ("Ask or Assume?", 2026) is from
+    a summary page, not the full paper.
 
 ## 20. Out of scope for V0
 - **From intent §7:** human wait-time metrics, Jira/Linear/GitHub intake, real production deployment, hosting, auth,
@@ -713,6 +743,8 @@ HHHHHHHHCHHCHHHHHHHH
   - attempt limits, gate settings and snapshots, and dependency blocking and merge order;
   - caps, version bumps and fingerprint dedup;
   - the template check and the intake flow;
+  - the scout's output cites a source for every fact, contains no proposals, and stays within its limit;
+  - Problem and Proposed outcome contain only the user's words.
   - rebuilding the cache from the event log, which must give the same state as before;
   - the doctor checks.
 - **MCP tests:**
