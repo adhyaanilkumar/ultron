@@ -67,5 +67,10 @@ Choices for the plan gate to confirm:
 6. **pydantic vs dataclasses.** T04 likely uses pydantic; T05 uses dataclasses to avoid a lockfile change. Easy to
    switch after T04 merges if the owner wants one style.
 
+## Changes during build
+- `repair()` opens the log read-write only to `ftruncate` the partial tail and `fsync`; appends still use `O_APPEND`.
+- A line with no `schema` key reads as schema 1 (the first), so a hand-written or early log isn't refused.
+- `gate_decision` ties `actor == "auto"` to `channel == "auto"`; decisions are `approve`, `changes`, `reject` (spec §2).
+
 ## Not in this task
 The `ultron/state` commit and its lock (T07), state folding (T08), the SQLite cache (T09), cost maths (T13).
