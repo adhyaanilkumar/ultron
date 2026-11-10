@@ -253,11 +253,11 @@ sequenceDiagram
 | Developer | Human | The `plan` gate |
 | Tester | Human | The `result` gate |
 | Developers | Human | Work the escalated Jira tickets |
+| Maintenance agent | ultron agent | Diagnoses a detected failure and writes `intent.md`. It never edits code or deploys. |
+| The host agent and its model (Claude Code in V0) | Host | Calls ultron's tools for the human. **It never decides a gate.** |
 
 In V0 every human role above is **the same single user** (D19). The roles are still recorded separately, by gate,
 so that adding real teams later doesn't change the event log.
-| Maintenance agent | ultron agent | Diagnoses a detected failure and writes `intent.md`. It never edits code or deploys. |
-| The host agent and its model (Claude Code in V0) | Host | Calls ultron's tools for the human. **It never decides a gate.** |
 
 **Requirement states** (only the engine changes them):
 `submitted → [intake_drafting → awaiting_intent] → spec_drafting → awaiting_spec → (changes → spec_drafting)* →
@@ -985,6 +985,7 @@ HHHHHHHHCHHCHHHHHHHH
 | `F` | Mouth and cheek gaps | `#262626` |
 
 **Text.**
+
 | Use | Colour |
 |---|---|
 | Wordmark `U L T R O N` | Crimson `#E5484D`, bold |
