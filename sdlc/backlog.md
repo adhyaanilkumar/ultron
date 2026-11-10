@@ -68,3 +68,17 @@ out how gates, limits and the audit trail would still be enforced, because the b
 Decided 2026-11-09 to keep V0 single-user (spec D19). Later, different people could hold the human roles (architect,
 developer, tester), and each gate would check that the person deciding has that role. This builds on team sync above.
 
+
+## Tool research per task (MCP scout)
+Decided 2026-11-10 by the owner, from the V0 self-build (lessons L1 and L2, and the MCP research run):
+- **What:** after decomposition, a research step finds the best MCP servers (or none) to **build and verify** each task. It works the way the intake scout does: it cites facts and sources and picks nothing. The decomposition agent then sets each task's `mcp` and each criterion's `verify_with` from that research.
+- **Tell the user what they have:** ultron checks the host's configured MCP servers and shows, per task:
+  - **have:** connected and ready;
+  - **missing:** recommended but not connected, with how to add it, its monthly cost in INR (stated before anything that costs money, CLAUDE.md budget rule) and any security caveat, such as a token with write access;
+  - **none needed.**
+- **Where it shows:** at the `tasks` gate (even when that gate is `auto`, the report is recorded and shown in `ultron_status`), and in `/ultron:doctor`.
+- **Rules:**
+  - The user decides whether to add a missing MCP. ultron never installs or registers one itself.
+  - A task whose `verify_with` needs a missing tool falls back to an `owner` check and is flagged.
+  - An MCP never replaces ultron's own engine checks. Tests of ultron's code still run against ultron's code.
+- **Why:** T35's mascot passed 80 tests but looked wrong on screen, because no criterion said how it had to be checked (lesson L1). In social-grid the owner picked the 21st.dev MCP for UI by hand. This makes that choice part of the pipeline.
