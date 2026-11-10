@@ -15,6 +15,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "mcp<2",
     "mypy",
     "pytest",
     "pyyaml",
@@ -30,3 +31,6 @@ testpaths = ["tests"]
 [tool.mypy]
 strict = true
 files = ["src"]
+
+[tool.ruff]
+extend-exclude = ["spikes"]

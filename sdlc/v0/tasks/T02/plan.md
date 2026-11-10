@@ -36,3 +36,7 @@ Rung: R1 (kept). Rubric total 3: one throwaway spike, one self-test, the rest is
 - AC4: owner step 3 plus control call; `hook.log` content cited in row 3.
 - AC5: `tests/test_spike_host.py::test_findings_host_table` checks the "Host" section has the 4 rows and the 5 columns (and, at the end, no "pending" cells). Rows: elicitation, notifications, `!` commands, version.
 - All commits gated on `make build`, `make lint`, `make test` success lines.
+
+## Departures from plan (code step)
+- `mcp` is pinned `<2` (resolved 1.30.0): mcp 2.x removed `mcp.server.fastmcp` (renamed `MCPServer`, different elicit flow). `ruff` excludes `spikes/` (`[tool.ruff] extend-exclude`).
+- Owner steps in the README are 5 numbered steps; step 4 includes the model-issued Bash control call.
