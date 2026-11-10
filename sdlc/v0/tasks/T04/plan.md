@@ -4,7 +4,7 @@ Author: developer agent (Claude). Rung: R1. Spec: §8, §9.1, §10.1, §11.3, §
 ## Files that change
 New (all under `src/ultron/config/`, a package inside the T01 layout; `config` is not in the §5.1 list, so it is a choice for the plan gate):
 - `__init__.py`: re-exports `load_config`, `Config`, `ConfigWarning`, `ConfigError`.
-- `models.py`: pydantic v2 models, `extra="forbid"` everywhere (gives AC7). Sections: `Commands`, `Deploy`/`Maintain`, `Gates`, `Agents` (per role: adapter, model, effort), `Ladder` (R0-R5 + `max_rung`), `Caps`, `Thresholds` (denied actions 5, no-progress 10 min), `Scout` (tool calls ~15, token cap), `Broker` (`ask_limit` 3), `Jira` (project, board, epic; no credentials), `Paths`.
+- `models.py`: pydantic v2 models, `extra="forbid"` everywhere (gives AC7). Sections: `Commands`, `Deploy`/`Maintain`, `Gates`, `Agents` (per role: adapter, model, effort), `Ladder` (R0-R5 + `max_rung`), `Caps`, `Thresholds` (denied actions 5, no-progress 10 min), `Scout` (`max_tool_calls` 15, `budget_cap` (named so no field matches "token")), `Broker` (`ask_limit` 3), `Jira` (project, board, epic; no credentials), `Paths`.
 - `defaults.py`: spec constants (D16 roles, §11.4 ladder, presets table, platform path defaults).
 - `loader.py`: `load_config(path, overrides=None)` reads TOML with stdlib `tomllib`, merges a per-requirement override dict (deep merge) over the repo file, then validates once. Returns `LoadedConfig(config, warnings)`.
 - `warnings.py`: `ConfigWarning` dataclass (gate, from, to, message) for AC6.
