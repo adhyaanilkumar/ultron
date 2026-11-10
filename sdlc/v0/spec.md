@@ -36,7 +36,7 @@ confirm or change it during this review.
 | D13 | ultron checks that the user is **signed in to a Claude Code account** before any ultron agent runs (§14). | Confirmed |
 | D14 | Look: the owner's Ultron pixel-art mascot in gunmetal with `#941212` eyes, a crimson `#E5484D` wordmark, and the owner's palette (§18). | Confirmed |
 | D15 | Evaluation: **SWE-bench Verified, sympy (75) and pytest (19)**, with a **5-requirement pilot** first. Evaluation runs don't create Jira tickets unless asked (§16). | Proposed |
-| D16 | Model for ultron agents: pinned in `ultron.toml` per role, default `claude-sonnet-5-5` at `medium` effort. The developer and testing agents instead run at their task's **rung** (D25). | Proposed |
+| D16 | Model and effort per role, pinned in `ultron.toml` and overridable: intake scout Haiku 5.5 medium; intake agent Sonnet 5.5 medium; spec (architect) and decomposition agents Opus 5.5 high; maintenance agent Sonnet 5.5 medium. The developer and testing agents run at their task's **rung** (D25) (§11.4). | Confirmed (2026-11-10) |
 | D17 | **ultron agents talk only through the engine (a broker).** No ultron agent contacts another directly. An ultron agent asks a question with a broker tool, and the engine records it, applies limits, routes it to the right role (any adapter), or asks the human. Agent-facing tools are an agent-neutral MCP interface, so Codex-based ultron agents can use them too (§11.2). | Confirmed (2026-11-09) |
 | D18 | **Direct peer-to-peer messaging between agents (e.g. the A2A protocol) is a backup**, kept in `sdlc/backlog.md` and used only if brokered messaging proves too limiting. | Confirmed (2026-11-09) |
 | D19 | **V0 is single-user.** One person plays every human role (requester, architect, developer, tester) on their own machine. Team features (team sync, separate people per role, permissions, the multi-project registry) are in `sdlc/backlog.md`. | Confirmed (2026-11-09) |
@@ -449,7 +449,7 @@ pass one.
 - **Intake scout (D23):** runs first, when `intake_research = "local"` (the default outside evaluation).
   - **Tools:** read-only Read, Grep and Glob over the target repo and `sdlc/requirements/*/{intent,spec}.md`. No
     shell, no web, no MCP tools.
-  - **Limit:** about 15 tool calls or a token cap, both set in `ultron.toml`. A smaller model may be used.
+  - **Limit:** about 15 tool calls or a token cap, both set in `ultron.toml`. It runs on Haiku 5.5 (§11.4).
   - **Output:** it writes `research.md`, containing **facts only, each citing a path, line or requirement id**:
     - the modules and files the request probably touches;
     - what exists today;
@@ -756,7 +756,17 @@ afterwards.
 Stronger models and higher effort pass more tasks but use the Pro plan's limits faster. ultron starts each task as
 low as its complexity allows and climbs only when an attempt fails.
 
-**The rung ladder** (V0, Pro plan):
+**Fixed roles** run at one setting each (D16), changeable in `ultron.toml`:
+
+| Role | Model | Effort | Why |
+|---|---|---|---|
+| Intake scout | Haiku 5.5 | medium | Finds and cites facts only |
+| Intake agent | Sonnet 5.5 | medium | Restates the user's words and asks questions |
+| Spec (architect) agent | Opus 5.5 | high | Runs once per requirement; design mistakes are expensive later |
+| Decomposition agent | Opus 5.5 | high | Sets the task graph and each task's starting rung |
+| Maintenance agent | Sonnet 5.5 | medium | Summarises evidence into an intent; edits no code |
+
+**The rung ladder** for the developer and testing agents (V0, Pro plan):
 
 | Rung | Model | Effort |
 |---|---|---|
