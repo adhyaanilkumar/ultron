@@ -18,7 +18,7 @@ Pinned SDK: `claude-agent-sdk==0.2.180` (dependency group `spikes`; T16 moves it
 | Windows Terminal | PENDING owner |
 | Git Bash | PENDING owner |
 | Linux/WSL | PENDING owner |
-| Claude Code Bash tool | PENDING owner |
+| Claude Code Bash tool | `not a terminal (stdin=True stdout=False)`, exit 3 (run by the engine 2026-11-10). Note: stdin reports a TTY here, so a stdin-only check would be fooled; T39 must check both. |
 
 ### SDK per model
 PENDING owner (paste the `sdk_check.py` table here)
