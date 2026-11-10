@@ -13,8 +13,10 @@ New:
   `colour_enabled(stream)`, `unicode_ok(stream)`, `force_utf8()`.
 - `tests/look/test_look.py`: all proofs below.
 Edited:
-- `src/ultron/cli.py`: hidden `look` subcommand (`help=argparse.SUPPRESS`). It calls `force_utf8()` on Windows and prints
+- `src/ultron/cli.py`: hidden `look` command. It calls `force_utf8()` on Windows and prints
   the mascot, wordmark and marker sample. `--version` keeps working.
+  Departure from the plan: `look` is matched on `argv == ["look"]` before argparse, not as an argparse subparser with
+  `help=argparse.SUPPRESS`. argparse still shows `{look}` in the usage line, so `--help` would reveal it.
 Not touched: gate and runner call sites (T38, T46 use this API later).
 
 ## API for later callers
