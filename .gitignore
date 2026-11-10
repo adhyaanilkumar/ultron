@@ -3,3 +3,11 @@
 
 # Owner's mascot reference image (third-party, watermarked); the spec holds the redrawn grid.
 ultron-pixel-art-*.webp
+
+# Python and tooling
+.venv/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/

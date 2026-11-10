@@ -1,0 +1,32 @@
+[project]
+name = "ultron"
+version = "0.0.0"
+description = "An AI-native SDLC pipeline injected into coding agents."
+readme = "CLAUDE.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+ultron = "ultron.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.7,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "pyyaml",
+    "ruff",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["src"]

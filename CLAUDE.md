@@ -6,7 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An AI-native SDLC pipeline that is **injected into coding agents**, not a standalone app: an MCP server plus a package for each host (the Claude Code plugin in V0: MCP registration, `/ultron:*` commands, a skill and a guard hook). It drives its own agents, called **ultron agents** (Claude Agent SDK by default, swappable per role) over a **target** git repo through intent, spec, tasks, plans, code and tests, with human gates. ultron agents communicate only through the engine (broker). The human approves through MCP elicitation forms, or the terminal-only `ultron gate` fallback, never through a model. The brief is `sdlc/v0/intent.md`. The method is Anthropic's *AI-Native SDLC Playbook* (the PDF in the repo root), applied the way the owner applied it in `C:\git\social-grid`, which you can use as a reference for patterns.
 
-Status: pre-implementation. There's no stack, build or tests yet. When the stack is chosen, add a Commands section like social-grid's: `make build`, `make lint` and `make test`, each ending in a fixed success line.
+Status: V0 build in progress. The Python stack is in place (T01): run the commands below before reporting anything done.
+
+## Commands
+Run from the repo root. Python 3.13 with `uv`. On Windows, if `make` isn't found, run `$env:Path += ";C:\msys64\usr\bin"` first. If `uv` isn't on PATH, run `make UV="C:\Users\Anil Kumar ML\.local\bin\uv.exe" <target>`.
+- `make build`: `uv sync --locked` and `uv build`. Ends with `Build succeeded`.
+- `make lint`: `ruff check`, `ruff format --check` and `mypy src` (strict). Ends with `Lint succeeded`.
+- `make test`: `pytest`. Ends with `All tests passed`.
+CI (`.github/workflows/ci.yml`) runs all three on pull requests, on Windows and Linux.
 
 ## Terms (decided 2026-11-09)
 - **Requirement:** one `intent.md` and everything derived from it. Results and spending caps are per requirement. The intent calls this a "ticket".
