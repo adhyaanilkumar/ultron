@@ -90,7 +90,8 @@ def _unicode_line(top: str, bottom: str, colour: bool) -> str:
     parts: list[str] = []
     for t, b in zip(top, bottom, strict=True):
         if t == "." and b == ".":
-            parts.append(" ")
+            # Reset first: a bare space would take the previous cell's background.
+            parts.append(f"{_RESET} " if colour else " ")
         elif not colour:
             # Plain mode: draw the shape only, so the pixels still read as a block.
             parts.append("▄" if t == "." else "▀")
