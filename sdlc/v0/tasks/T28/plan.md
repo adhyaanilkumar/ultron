@@ -62,3 +62,24 @@ Attempt 1 failed at the tester with 4 real defects. Fixes, each reproduced first
 - Also a test that `partial` requirements are pruned like `complete` ones (`test_prune.py`).
 Risks: a longer lock hold in prune while a reader keeps the file open; bounded, then the error surfaces.
 Proof: new tests plus all of `tests/acceptance/test_t28.py`, `make build`, `make lint`, `make test`.
+
+## Attempt 3 (R3)
+Attempt 2 failed at the tester with defect E. Fixes, each reproduced first by a test in `tests/monitor/`:
+- E. `prune` wrote `activity.seq` as the max `n` of the rows still in the file, so a second prune after the newest
+  rows were gone lowered the high-water mark and the next append reused cursors a follower had passed. The mark now
+  never goes down: one helper writes `max(stored mark, new value)` under the lock, atomically (temp file and
+  `os.replace`, so a crash cannot leave it empty), and every writer path (append, prune) goes through it. Reading
+  the mark retries a busy file and treats a missing or corrupt `activity.seq` as "unknown": the mark is then
+  recovered from the highest `n` in the file, never below a readable stored value. A boolean `n` is not a cursor.
+  Files: `activity.py`, `test_prune.py` (repeat-prune case and a seeded random append/prune property test),
+  `test_cursor.py` (missing/corrupt mark).
+- Tester advice: a failed prune removes its `activity.jsonl.tmp` (and a stale one is cleared before writing);
+  the defang step also catches NFKC look-alikes (fullwidth `＜`, `／`, fullwidth letters) and ignores invisible
+  format characters (zero-width space) between `<` and the tag name. Files: `activity.py`, `query.py`,
+  `test_prune.py`, `test_transcript.py`.
+- Not done: defanging the raw `lines` field of `transcript_tail`. `tests/acceptance/test_t28.py`
+  (`test_attempt2_lines_field_is_raw_but_the_result_is_labelled`) requires `lines` to stay raw, and acceptance tests
+  are not mine to change; the result stays labelled `untrusted: true` with the notice.
+Risks: an unreadable mark plus a file whose newest rows were already pruned cannot be fully recovered (only by
+hand-editing `.ultron`); the atomic write makes this need outside tampering.
+Proof: new tests plus all of `tests/acceptance/test_t28.py`, `make build`, `make lint`, `make test`.
