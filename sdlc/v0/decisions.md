@@ -127,7 +127,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R3 | First implementation; AC6 intent finished after D28 | Failed (4 tests): `config_change` could make merge/deploy/rollback read as auto; escalation-gate decision accepted for a task not failed/rejected |
 | 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected/call_for_edit/escalated tasks, judged by current state | Failed (10 tests): a non-string mode value in the log crashes `settings()` (unhashable type) |
-| 3 | R5 | Type checks on every log value and caller argument; D30: refuse a second escalation decision per visit to the gate | Developer green (4354 passed, all 696 of test_t10.py); in testing |
+| 3 | R5 | Type checks on every log value and caller argument; D30: refuse a second escalation decision per visit to the gate | Passed: 1658 T10 acceptance tests (962 new fuzz/D30), 5659 total; 14 planted faults caught |
 | 2026-11-11 | attempt | T28 attempt 1 (R1) | engine | fail | 4 failed, 3143 passed: prune crashes against an open reader on Windows; append after a torn tail loses a row; a new attempt shows the old attempt's activity; </untrusted-data> in content closes the wrapper; climb to R2 |
 
 ### T28 · Activity stream and monitor
@@ -145,7 +145,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R3 | Denylist permission policy with a quote-aware shell parser; post-call diff check inside the worktree | Failed (63 tests): many policy bypasses; usage-limit misclassified from the agent's text; interrupt over 5 s when the session hangs |
 | 2 | R4 | Deny-by-default Bash allowlist instead of a denylist; outside-worktree and `.git` checks after every call; classify from SDK error fields only; one overall 5 s interrupt budget; PowerShell removed; `repocheck` snapshot/compare after each call | Failed (22 tests): option re-parsing bypasses; deleted `.git` link skips the after-call check |
-| 3 | R5 | Per-program option allowlists (deny every option not listed); Glob/Grep paths trimmed like the CLI; re-check paths after each command in a chain; a worktree that stops being one is reported | In progress |
+| 3 | R5 | Per-program option allowlists (`shellrules.py`); no `@`-files or leading `-` values; trimmed paths denied; a worktree-writing `git restore` must end the call; the after-call check never skips; hooksPath/LFS/gitattributes watched | Developer green (4040 passed, all of test_t16.py); in testing |
 | 2026-11-11 | attempt | T28 attempt 2 (R2) | engine | fail | 9 failed, 3202 passed: a second prune lowers activity.seq, so new rows reuse cursors a follower already passed; climb to R3 for attempt 3 (last) |
 | 2026-11-11 | result | T08 D29 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T08 (D29) into v0-design | adhyaanilkumar | approve | |
@@ -162,3 +162,4 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | result | T28 attempt 3 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T18 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T28 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T28 | engine | resolve | calllog.py conflict with T18: kept T28 live activity and T18 event fields; full suite green (4059 passed) before commit |
