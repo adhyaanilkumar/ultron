@@ -71,3 +71,63 @@ Choices I made (for the plan gate to confirm):
 
 ## Not in this task
 No engine, runner or MCP code. No Jira. No model calls. The fake `AgentRunner` comes later (T15).
+
+## Rerun R0 (tasks.md revised 2026-11-10; developer, 2026-11-11)
+
+Starting point: the merged T01 code, kept as it is. The revision adds AC8 and AC9 and a `verify_with` per criterion. Changes are limited to what the criteria need.
+
+Baseline, run from PowerShell 5.1 with `C:\msys64\usr\bin` on PATH and `uv` not on PATH (the owner's shell):
+- `make build` fails: `make: uv: No such file or directory`, exit 2. This breaks AC1 and AC9.
+- `pytest` gives 45 passed, 1 failed: `test_ac4_version_matches_pyproject` calls `uv` by name, which needs `uv` on PATH. This breaks AC3 and AC4 under `make test`.
+- The CLAUDE.md workaround `make UV="C:\Users\Anil Kumar ML\.local\bin\uv.exe"` also can't work: the spaces split the command.
+
+**Files that change**
+- `Makefile`: if `uv` isn't on PATH, use the per-user install (`$USERPROFILE/.local/bin`, via `cygpath`), escape its spaces for the recipe, and prepend its directory to PATH so the tests can run `uv` by name. A `UV=` on the command line still wins (the acceptance tests rely on that).
+- `tests/test_makefile.py` (new): tests for the lookup, written first and seen red.
+- `CLAUDE.md`: the Commands note loses the `make UV=` workaround and says the Makefile finds the per-user `uv`.
+- `sdlc/v0/tasks/T01/plan.md`: this section.
+Not touched: `tests/acceptance/`, `tasks.md`, `decisions.md`, `spec.md`, `tasks.json`.
+
+**Order of work**
+1. Commit this plan alone: `T01 rerun: plan (plan gate: auto)`.
+2. Write `tests/test_makefile.py`, run it, and confirm it fails for the expected reason.
+3. Change the `Makefile`; the test goes green.
+4. Edit the CLAUDE.md Commands note.
+5. Run `make build`, `make lint`, `make test` from PowerShell 5.1 with MSYS2 on PATH (AC9), and `pytest` (AC4 included). Paste the last lines.
+6. Commit the code: `T01 rerun: developer code (R0)`.
+
+**Proof per criterion** (AC9 = the owner's shell; `command` runs go through the PowerShell tool)
+
+| AC | verify_with | Proof | Status expected |
+|---|---|---|---|
+| AC1 | `command` | `make build` from PowerShell exits 0, last line `Build succeeded`; `dist/` holds the wheel and sdist | met |
+| AC1 | `ci` | the Build step on `windows-latest` and `ubuntu-latest` | ci-blocked (no GitHub remote) |
+| AC2 | `command` | `make lint` exits 0, no warning lines, last line `Lint succeeded` | met |
+| AC2 | `ci` | the Lint step on both OSes | ci-blocked |
+| AC3 | `command` | `make test` exits 0, last line `All tests passed` | met |
+| AC3 | `pytest` | `tests/acceptance/test_t01.py` negative test (owned by the testing agent; I only run it) | met if it passes |
+| AC4 | `pytest` | `tests/test_cli.py::test_version`; `test_ac4_version_matches_pyproject` passes once `uv` is on PATH | met |
+| AC4 | `command` | `uv run ultron --version` prints the pyproject version | met |
+| AC5 | `pytest` | `tests/test_layout.py`: 12 components import | met (unchanged) |
+| AC6 | `pytest` | `tests/test_ci.py`: trigger, OS matrix, the three `make` steps | met (unchanged) |
+| AC6 | `ci` | a real pull-request run is green on both OSes | ci-blocked |
+| AC7 | `pytest` | `tests/test_claude_md.py`: Commands section with targets and success lines; no "pre-implementation" | met after the CLAUDE.md edit |
+| AC8 | `ci` | `gh run list --workflow ci.yml`, run URL recorded | ci-blocked: no GitHub remote, and no push in this task |
+| AC9 | `command` | the three targets run from PowerShell with MSYS2 on PATH; last lines pasted | met after the Makefile fix |
+
+**Tests for the lookup (`tests/test_makefile.py`)**
+- With a `uv` on PATH, `make -n build` runs `uv` by name.
+- On Windows only, with `uv` off PATH and `USERPROFILE` pointing at a folder with `.local/bin/uv.exe`, `make -n build` runs that path with its spaces escaped.
+
+**Risks**
+1. `cygpath` exists only in MSYS2 and Git Bash. On Linux CI the fallback branch never runs, and `uv` is on PATH from `setup-uv`.
+2. PATH entries from MSYS are converted for native children. Checked by `test_ac4` passing under `make test`.
+3. AC8 and the `ci` rows can't be proven without a GitHub remote. Reported as ci-blocked. Adding a remote or pushing is outside this task.
+4. The `make UV=` workaround never worked with spaces. The CLAUDE.md note is corrected so the owner doesn't rely on it.
+5. `Co-Authored-By` for this commit follows the brief (Opus 5.5), which conflicts with the harness reminder (Haiku 5.5). The owner should pick one.
+
+**Departures from this rerun plan (CODE step, R0)**
+- The PATH change is made in each recipe's shell (`env PATH=...`), not with `export PATH` in make. The first try broke `make test`: MSYS2 make's PATH mangles `;` entries, so the child lost `make`.
+- The `make` folder is added as well as the uv folder, because MSYS2 make also drops its own folder from the PATH it gives children (`C:\msys64\usr\bin`), so `make` wasn't found inside the acceptance tests even before this change. Both folders go in POSIX form via `cygpath`.
+- The fallback and the PATH prefix run only on Windows (`ifeq ($(OS),Windows_NT)`), so Linux CI never calls `cygpath`.
+- `tests/test_makefile.py` has no Linux-only skip: the uv-on-PATH test runs everywhere, and the fallback test runs only on Windows.
