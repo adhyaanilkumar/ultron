@@ -161,3 +161,24 @@ def test_ac5_findings_names_default_adapter_slot() -> None:
     text = FINDINGS.read_text(encoding="utf-8")
     assert re.search(r"Default adapter:", text)
     assert "T16" in text and "T17" in text
+
+
+def test_ac5_uv_lock_check_exits_zero() -> None:
+    proc = subprocess.run(
+        ["uv", "lock", "--check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={k: v for k, v in os.environ.items() if k != "UV"},
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_ac3_recorded_row_reports_not_a_terminal() -> None:
+    text = FINDINGS.read_text(encoding="utf-8")
+    row = next(
+        line for line in text.splitlines() if line.startswith("| Claude Code Bash tool")
+    )
+    assert "not a terminal" in row
+    assert "exit 3" in row
