@@ -76,7 +76,8 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R3 | First implementation | Failed (2 tests): auth header reachable via `JiraUnreachable.__context__`; missing attachment after create raised without `issue_key` |
-| 2 | R4 | Raise outside the `except` so no exception keeps the httpx error; check attachments before creating; wrap post-create failures with `issue_key`; kanban board treated as backlog | Developer green (800 passed); in testing. Pre-create attachment check not added: an acceptance test requires `issue_key` for a file missing from the start |
+| 2 | R4 | Raise outside the `except` so no exception keeps the httpx error; check attachments before creating; wrap post-create failures with `issue_key`; kanban board treated as backlog | Developer green (800 passed); in testing. Pre-create attachment check not added: an acceptance test requires `issue_key` for a file missing from the start Failed at testing (78 tests): HTTP error-status path still reaches the token through the traceback frame local `response` |
+| 3 | R5 | Drop every httpx request/response object before raising, on all paths incl. HTTP error status; walker covers traceback frame locals | In progress |
 
 ### T35 · Mascot
 | Attempt | Rung | What was different | Result |
@@ -85,3 +86,4 @@ For every task that needs more than one attempt: what each attempt did different
 | 2 | R1 | Reset colour before every transparent cell | Untested (owner stopped all work) |
 | Rerun (send-back, not counted) | R1 | Tests render through `pyte` with colour state carried across cells; Chrome screenshot check | Passed, merged |
 | 2026-11-11 | stop | T06 attempt 3, T25 attempt 2 testing | engine | rerun | Pro 5-hour usage limit hit; not counted, no climb; resumed from where they stopped |
+| 2026-11-11 | attempt | T25 attempt 2 (R4) | engine | fail | 78 failed, 992 passed: HTTP-status JiraError keeps the token reachable via __traceback__ frame local 'response' (.request.headers authorization); climb to R5 for attempt 3 (last) |
