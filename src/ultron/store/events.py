@@ -55,6 +55,16 @@ EDIT_REQUESTED = "edit_requested"
 """The user's question through `ultron_call_for_edit` (human-confirmed): `escalated` → `call_for_edit`."""
 EDIT_DONE = "edit_done"
 """The task's developer agent added the missing file or attached its answer: `call_for_edit` → `escalated`."""
+# D29 (spec §3, §12): every escalation reason runs the attachment check, so `attachment_missing` is legal from any
+# escalatable state, and once more in `call_for_edit` for a second round. "File anyway" is its own event:
+FILED_WITH_MISSING = "filed_with_missing"
+"""The ticket is filed without a missing attachment and says which (`data.missing`): `call_for_edit` (before filing)
+→ `escalated`. `data.reason` is one of `FILED_REASONS`."""
+FILED_REASON_CAP = "cap"
+"""`filed_with_missing` reason: the spending cap was reached during `call_for_edit`."""
+FILED_REASON_EDIT_ROUNDS = "edit_rounds"
+"""`filed_with_missing` reason: still missing after the last `call_for_edit` round."""
+FILED_REASONS = frozenset({FILED_REASON_CAP, FILED_REASON_EDIT_ROUNDS})
 
 GATE_DECISIONS = frozenset({"approve", "changes", "reject"})
 GATE_CHANNELS = frozenset({"form", "terminal", "auto"})
