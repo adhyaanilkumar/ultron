@@ -17,6 +17,7 @@ build-backend = "uv_build"
 dev = [
     "mcp<2",
     "mypy",
+    "pyte>=0.8.2",
     "pytest",
     "pyyaml",
     "ruff",
