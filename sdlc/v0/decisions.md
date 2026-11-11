@@ -183,8 +183,10 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R3 | First implementation (`attempts.py`, `decide()`) | Failed (19 tests): capped first rung recorded wrong; path normalisation; restart grants extra attempts |
-| 2 | R4 | Record the rung that ran (capped); full path normalisation with `PolicyError` for paths outside the repo; `for_task` from the folded status plus `from_log` rebuild; `finished_event` with reason and failures | Developer green (6718 passed, all 260 of test_t12.py); in testing |
+| 2 | R4 | Record the rung that ran (capped); full path normalisation with `PolicyError` for paths outside the repo; `for_task` from the folded status plus `from_log` rebuild; `finished_event` with reason and failures | Failed (3 tests): fingerprints differ for random hex ids and UUIDs; all three attempt-1 defects fixed; ~2,500 restart checks pass |
+| 3 | R5 | Normalise volatile tokens in fingerprints (hex ids of any first character, UUIDs, hashes) while keeping meaningful quoted identifiers | In progress |
 | 2026-11-11 | result | T28 post-merge test fix | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T28 (test fix) into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | attempt | T12 attempt 1 (R3) | engine | fail | 19 failed: history records the start rung, not the capped rung that ran; `..`, `/./`, `//` paths not normalised for tests_modified; `for_task` drops the folded attempt count, so a restart grants extra attempts; climb to R4 |
 | 2026-11-11 | attempt | T36 attempt 2 (R3) | engine | fail | 1 failed, 4192 passed: an unterminated 7-bit OSC (ESC ]) deletes the rest of a file in results (content loss, not security); climb to R4 for attempt 3 (last) |
+| 2026-11-11 | attempt | T12 attempt 2 (R4) | engine | fail | 3 failed, 6911 passed: AC4 fingerprints split on random ids (quoted hex starting with a letter; unquoted UUIDs), so the same failure twice isn't recognised; climb to R5 for attempt 3 (last) |
