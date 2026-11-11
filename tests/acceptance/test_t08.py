@@ -1542,6 +1542,490 @@ def test_ac5_a_token_that_is_not_four_lowercase_hex_digits_is_refused(
         ids.new_requirement_id(tmp_path, token=lambda: bad)
 
 
+# --- attempt 2: the Jira-ticket escalation record after the requirement settled (spec §12) --------------------
+# The fix: an `escalation` record for a task that is already `escalated` is a no-op whatever the requirement's
+# state. A first escalation on a settled requirement (approved, blocked or unknown task) is still illegal, and no
+# other task event becomes legal after settling.
+
+
+def _settled(outcome: str) -> tuple[Log, dict[str, TaskState]]:
+    """A requirement that has just settled as `outcome`, and the state of each of its tasks."""
+    log = Log()
+    if outcome == "complete":
+        log.to_in_progress({"A": {}, "B": {"depends_on": ["A"]}})
+        log.approve_task("A")
+        log.approve_task("B")
+        want = {"A": T.APPROVED, "B": T.APPROVED}
+    elif outcome == "partial":
+        log.to_in_progress(
+            {"A": {}, "B": {"max_attempts": 2}, "C": {"depends_on": ["B"]}}
+        )
+        log.approve_task("A")
+        log.begin("B")
+        log.fail_all_attempts("B", 2)
+        log.escalate("B", reason="all attempts failed", ticket=None)
+        want = {"A": T.APPROVED, "B": T.ESCALATED, "C": T.BLOCKED}
+    elif outcome == "escalated":
+        log.to_in_progress(
+            {"A": {"max_attempts": 1}, "B": {"depends_on": ["A"]}, "C": {}}
+        )
+        log.begin("C")
+        log.start_attempt("C", 1)
+        log.code("C")
+        log.finish("C", 1, "passed")
+        log.result("C", "reject")
+        log.escalate("C", reason="rejected", ticket=None)
+        log.begin("A")
+        log.fail_all_attempts("A", 1)
+        log.escalate("A", reason="all attempts failed", ticket=None)
+        want = {"A": T.ESCALATED, "B": T.BLOCKED, "C": T.ESCALATED}
+    else:  # pragma: no cover - test helper misuse
+        raise AssertionError(outcome)
+    snap = fold(log.events)
+    assert snap.requirement is R(outcome)
+    assert states(snap) == want
+    return log, want
+
+
+SETTLED_OUTCOMES = ("complete", "partial", "escalated")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "repeats"),
+    [(o, n) for o in ("partial", "escalated") for n in (1, 2, 5)],
+)
+def test_a2_ticket_record_after_settling_is_a_no_op(outcome: str, repeats: int) -> None:
+    """The ticket (and its sprint placement, and retried filings) arrives after the requirement settled: the log
+    must replay, and the snapshot is exactly what it was before the records."""
+    log, _ = _settled(outcome)
+    before = fold(log.events)
+    escalated = [name for name, s in before.tasks.items() if s.state is T.ESCALATED]
+    assert escalated
+    for i in range(repeats):
+        for name in escalated:
+            log.escalate(
+                name,
+                reason="all attempts failed",
+                ticket=None if i == 0 and repeats > 1 else f"AD-{1000 + i}",
+                sprint="active" if i % 2 else "backlog",
+            )
+    after = fold(log.events)
+    assert after == before
+    assert after.requirement is R(outcome)
+
+
+def test_a2_ticket_record_for_each_escalated_task_in_any_order() -> None:
+    log, _ = _settled("escalated")
+    before = fold(log.events)
+    for name in ("A", "C", "A", "C", "C"):
+        log.escalate(name, reason="filed", ticket=f"AD-{name}")
+        assert fold(log.events) == before
+
+
+def test_a2_ticket_record_with_a_task_level_attempt_field_is_a_no_op() -> None:
+    """The real `escalation(...)` builder can carry `attempt`; the repeat is still a no-op."""
+    log, _ = _settled("partial")
+    before = fold(log.events)
+    log.add(
+        "escalation", task="B", attempt=2, reason="all attempts failed", ticket="AD-7"
+    )
+    log.add("escalation", task="B", attempt=1, reason="pending", ticket=None)
+    assert fold(log.events) == before
+
+
+def test_a2_ticket_record_interleaved_with_other_tasks_events() -> None:
+    """A escalates while B and C still run; ticket records for A land between their events; nothing of B or C
+    changes because of them, and the requirement settles as partial only when B and C finish."""
+    log = Log()
+    log.to_in_progress(
+        {
+            "A": {"max_attempts": 1},
+            "B": {},
+            "C": {"max_attempts": 2},
+            "D": {"depends_on": ["A"]},
+        }
+    )
+    log.begin("A")
+    log.fail_all_attempts("A", 1)
+    log.escalate("A", reason="all attempts failed", ticket=None)
+    log.add("task_started", task="B")
+    log.escalate(
+        "A", reason="all attempts failed", ticket=None
+    )  # filing pending, retried
+    log.add("plan_drafted", task="B")
+    log.begin("C")
+    log.escalate("A", reason="all attempts failed", ticket="AD-500")
+    log.gate("plan", "approve", task="B")
+    log.start_attempt("B", 1)
+    log.start_attempt("C", 1)
+    log.add("agent.stopped", task="C", attempt=1, then="hold")
+    log.escalate("A", reason="all attempts failed", ticket="AD-500", sprint="active")
+    snap = fold(log.events)
+    assert snap.requirement is R.IN_PROGRESS
+    assert states(snap) == {
+        "A": T.ESCALATED,
+        "B": T.CODING,
+        "C": T.HELD,
+        "D": T.BLOCKED,
+    }
+    assert (snap.tasks["B"].attempt, snap.tasks["C"].attempt) == (1, 1)
+    assert snap.tasks["C"].held_from is T.CODING
+    log.add("task_resumed", task="C")
+    log.code("B")
+    log.escalate("A", reason="all attempts failed", ticket="AD-500")
+    log.code("C")
+    log.finish("B", 1, "passed")
+    log.finish("C", 1, "failed")
+    log.escalate("A", reason="all attempts failed", ticket="AD-500")
+    log.result("B", "approve")
+    assert fold(log.events).requirement is R.IN_PROGRESS  # C is planning again
+    log.replan("C")
+    log.start_attempt("C", 2)
+    log.code("C")
+    log.finish("C", 2, "failed")
+    log.escalate("C", reason="all attempts failed", ticket=None)
+    snap = fold(log.events)
+    assert snap.requirement is R.PARTIAL
+    assert states(snap) == {
+        "A": T.ESCALATED,
+        "B": T.APPROVED,
+        "C": T.ESCALATED,
+        "D": T.BLOCKED,
+    }
+    # both tickets arrive after settling, interleaved
+    log.escalate("C", reason="all attempts failed", ticket="AD-501")
+    log.escalate("A", reason="all attempts failed", ticket="AD-500")
+    log.escalate("C", reason="all attempts failed", ticket="AD-501", sprint="next")
+    assert fold(log.events) == snap
+
+
+def test_a2_interleaved_ticket_records_equal_the_log_without_them() -> None:
+    """Dropping every repeated escalation record from a log gives the same state at every point."""
+    log = Log()
+    log.to_in_progress({"A": {"max_attempts": 1}, "B": {}})
+    log.begin("A")
+    log.fail_all_attempts("A", 1)
+    log.escalate("A", reason="failed", ticket=None)
+    repeat_seqs: set[int] = set()
+    log.add("task_started", task="B")
+    repeat_seqs.add(log.add("escalation", task="A", reason="failed", ticket=None).seq)
+    for step in (
+        lambda: log.add("plan_drafted", task="B"),
+        lambda: log.gate("plan", "approve", task="B"),
+        lambda: log.start_attempt("B", 1),
+        lambda: log.code("B"),
+        lambda: log.finish("B", 1, "passed"),
+        lambda: log.result("B", "approve"),
+    ):
+        step()
+        repeat_seqs.add(
+            log.add("escalation", task="A", reason="failed", ticket="AD-9").seq
+        )
+    with_repeats = log.events
+    without = [e for e in with_repeats if e.seq not in repeat_seqs]
+    assert fold(with_repeats) == fold(without)
+    assert fold(with_repeats).requirement is R.PARTIAL
+    for k in range(len(with_repeats) + 1):
+        prefix = with_repeats[:k]
+        assert fold(prefix) == fold([e for e in prefix if e.seq not in repeat_seqs])
+
+
+@pytest.mark.parametrize("outcome", SETTLED_OUTCOMES)
+def test_a2_first_escalation_after_settling_is_still_illegal(outcome: str) -> None:
+    """Every task that is not escalated (approved or blocked), and an unknown task, cannot be escalated once the
+    requirement has settled."""
+    _, want = _settled(outcome)
+    targets = [name for name, s in want.items() if s is not T.ESCALATED] + ["NOPE"]
+    assert targets
+    for name in targets:
+        log, _ = _settled(outcome)
+        log.escalate(name, reason="spending cap", ticket=None)
+        with pytest.raises(IllegalTransition):
+            fold(log.events)
+
+
+def test_a2_first_escalation_of_a_blocked_task_after_a_ticket_record_is_still_illegal() -> (
+    None
+):
+    log, _ = _settled("partial")
+    log.escalate("B", reason="filed", ticket="AD-1")  # fine: B is escalated
+    assert fold(log.events).requirement is R.PARTIAL
+    log.escalate("C", reason="blocked", ticket=None)  # C is blocked, not escalated
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+def test_a2_escalation_of_an_approved_task_is_illegal_in_progress_too() -> None:
+    log = Log()
+    log.to_in_progress({"A": {}, "B": {}})
+    log.approve_task("A")
+    log.escalate("A", reason="x", ticket="AD-1")
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+def test_a2_requirement_level_escalation_record_after_settling_is_still_a_no_op() -> (
+    None
+):
+    log, _ = _settled("escalated")
+    before = fold(log.events)
+    log.add("escalation", reason="spending cap", ticket="AD-77")  # no task
+    assert fold(log.events) == before
+
+
+# The sweep through fold: every task event, for every task of every settled requirement. Only the repeated
+# `escalation` record of an escalated task is accepted.
+
+TaskEventFn = Any
+
+
+def _task_events() -> dict[str, TaskEventFn]:
+    out: dict[str, TaskEventFn] = {
+        "task_created": lambda log, n: log.add("task_created", task=n),
+        "task_started": lambda log, n: log.add("task_started", task=n),
+        "plan_drafted": lambda log, n: log.add("plan_drafted", task=n),
+        "coding_finished": lambda log, n: log.add("coding_finished", task=n),
+        "result_requested": lambda log, n: log.add("result_requested", task=n),
+        "task_resumed": lambda log, n: log.add("task_resumed", task=n),
+        "attempt_started": lambda log, n: log.add("attempt_started", task=n),
+        "escalation": lambda log, n: log.add(
+            "escalation", task=n, reason="r", ticket="AD-1"
+        ),
+        "agent.stopped(default)": lambda log, n: log.add("agent.stopped", task=n),
+    }
+    for then in ("hold", "retry", "escalate"):
+        out[f"agent.stopped({then})"] = lambda log, n, t=then: log.add(
+            "agent.stopped", task=n, then=t
+        )
+    for outcome in ("passed", "failed", "stopped"):
+        out[f"attempt_finished({outcome})"] = lambda log, n, o=outcome: log.add(
+            "attempt_finished", task=n, outcome=o
+        )
+    for gate in ("plan", "result"):
+        for decision in DECISIONS:
+            out[f"{gate}.{decision}"] = lambda log, n, g=gate, d=decision: log.gate(
+                g, d, task=n
+            )
+    return out
+
+
+TASK_EVENTS = _task_events()
+
+
+@pytest.mark.parametrize("outcome", SETTLED_OUTCOMES)
+def test_a2_sweep_every_task_event_after_settling(outcome: str) -> None:
+    _, want = _settled(outcome)
+    wrongly_allowed = []
+    wrongly_refused = []
+    for name in [*want, "NOPE"]:
+        for label, add in TASK_EVENTS.items():
+            log, _ = _settled(outcome)
+            before = fold(log.events)
+            add(log, name)
+            expected_ok = label == "escalation" and want.get(name) is T.ESCALATED
+            try:
+                after = fold(log.events)
+            except IllegalTransition:
+                if expected_ok:
+                    wrongly_refused.append((name, label))
+                continue
+            if not expected_ok:
+                wrongly_allowed.append((name, want.get(name), label))
+            elif after != before:
+                wrongly_allowed.append((name, "changed state", label))
+    assert not wrongly_refused
+    assert not wrongly_allowed
+
+
+def test_a2_sweep_every_task_event_on_an_escalated_task_in_progress() -> None:
+    """While the requirement is still in progress, an escalated task takes only the repeated record (a no-op).
+
+    `attempt_finished` with outcome `stopped` is left out: it is a no-op for every task by design (the
+    `agent.stopped` event decides), unchanged by attempt 2."""
+    wrongly_allowed = []
+    for label, add in TASK_EVENTS.items():
+        if label == "attempt_finished(stopped)":
+            continue
+        log = Log()
+        log.to_in_progress({"A": {}, "B": {}})
+        log.begin("A")
+        log.escalate("A", reason="cap", ticket=None)
+        before = fold(log.events)
+        assert before.requirement is R.IN_PROGRESS
+        add(log, "A")
+        try:
+            after = fold(log.events)
+        except IllegalTransition:
+            if label == "escalation":
+                wrongly_allowed.append(("refused", label))
+            continue
+        if label != "escalation" or after != before:
+            wrongly_allowed.append(("allowed", label))
+    assert not wrongly_allowed
+
+
+def test_a2_table_sweeps_are_unchanged_by_the_fix() -> None:
+    """The fix is in the fold, not the tables: the pure tables still match the hand-written §3 tables exactly."""
+    for (state, trigger), want in LEGAL_REQ.items():
+        assert next_requirement_state(state, trigger) is want
+    for state in RequirementState:
+        for trigger in UNIVERSE:
+            if (state, trigger) not in LEGAL_REQ:
+                with pytest.raises(IllegalTransition):
+                    next_requirement_state(state, trigger)
+    for state in TaskState:
+        for trigger in UNIVERSE:
+            if trigger == "task_resumed":
+                continue
+            if (state, trigger) in LEGAL_TASK:
+                assert next_task_state(state, trigger) is LEGAL_TASK[(state, trigger)]
+            else:
+                # including (escalated, escalation) and (blocked, escalation): the no-op lives in the fold only
+                with pytest.raises(IllegalTransition):
+                    next_task_state(state, trigger)
+
+
+def test_a2_new_tasks_cannot_be_created_after_settling() -> None:
+    for outcome in SETTLED_OUTCOMES:
+        log, _ = _settled(outcome)
+        log.add("task_created", task="Z")
+        with pytest.raises(IllegalTransition):
+            fold(log.events)
+
+
+def test_a2_a_requirement_gate_after_settling_is_still_illegal() -> None:
+    for outcome in SETTLED_OUTCOMES:
+        for gate in ("intent", "spec", "tasks"):
+            log, _ = _settled(outcome)
+            log.gate(gate, "approve")
+            with pytest.raises(IllegalTransition):
+                fold(log.events)
+
+
+# A realistic full log written and read back through the real event log (T05), then replayed.
+
+
+def _realistic_log(tmp_path: Path) -> list[Event]:
+    from ultron.store import events as ev
+    from ultron.store.eventlog import EventLog, events_path
+
+    req = REQ
+    user = ev.user_actor("Tester", "tester@example.com")
+
+    def new(
+        type_: str, task: str | None = None, attempt: int | None = None, **data: Any
+    ) -> ev.NewEvent:
+        return ev.NewEvent(
+            actor="engine",
+            type=type_,
+            requirement=req,
+            task=task,
+            attempt=attempt,
+            data=data,
+        )
+
+    def gate(
+        gate_: str, decision: str, task: str | None = None, auto: bool = False
+    ) -> ev.NewEvent:
+        return ev.gate_decision(
+            req,
+            actor="auto" if auto else user,
+            gate=gate_,
+            decision=decision,
+            channel="auto" if auto else "terminal",
+            task=task,
+        )
+
+    stream: list[ev.NewEvent] = [
+        ev.intake(req, actor=user, source="text", request_path="request.md"),
+        new("intake_started"),
+        new("intent_drafted"),
+        gate("intent", "approve"),
+        new("spec_drafted"),
+        gate("spec", "approve"),
+        new("decomposition_started"),
+        new("task_created", task="T1", depends_on=[], max_attempts=2),
+        new("task_created", task="T2", depends_on=["T1"]),
+        new("task_created", task="T3", depends_on=[]),
+        new("tasks_drafted"),
+        gate("tasks", "approve", auto=True),
+        # T3 is approved
+        new("task_started", task="T3"),
+        new("plan_drafted", task="T3"),
+        gate("plan", "approve", task="T3", auto=True),
+        ev.attempt_started(req, "T3", 1, rung="R1"),
+        new("coding_finished", task="T3", attempt=1),
+        ev.attempt_finished(req, "T3", 1, outcome="passed"),
+        new("result_requested", task="T3"),
+        gate("result", "approve", task="T3"),
+        # T1 fails both attempts, then escalates; T2 is blocked behind it
+        new("task_started", task="T1"),
+        new("plan_drafted", task="T1"),
+        gate("plan", "approve", task="T1"),
+        ev.attempt_started(req, "T1", 1, rung="R1"),
+        new("coding_finished", task="T1", attempt=1),
+        ev.attempt_finished(req, "T1", 1, outcome="failed"),
+        new("plan_drafted", task="T1"),
+        gate("plan", "changes", task="T1"),
+        new("plan_drafted", task="T1"),
+        gate("plan", "approve", task="T1"),
+        ev.attempt_started(req, "T1", 2, rung="R2"),
+        ev.attempt_finished(req, "T1", 2, outcome="stopped"),
+        new("agent.stopped", task="T1", attempt=2, then="retry", reason="no progress"),
+        gate("escalation", "approve", task="T1", auto=True),
+        ev.escalation(
+            req, task="T1", attempt=2, reason="all attempts failed", ticket=None
+        ),
+        # Jira unreachable: filing is pending, retried, then the key and sprint placement are recorded
+        ev.escalation(
+            req, task="T1", attempt=2, reason="all attempts failed", ticket=None
+        ),
+        ev.escalation(
+            req, task="T1", attempt=2, reason="all attempts failed", ticket="AD-4242"
+        ),
+        gate("merge", "approve", task="T3"),
+        gate("deploy", "approve"),
+    ]
+    log = EventLog(events_path(tmp_path, req))
+    for item in stream:
+        log.append(item)
+    return log.read(strict=True).events
+
+
+def test_a2_replay_of_a_realistic_full_log_is_deterministic(tmp_path: Path) -> None:
+    events = _realistic_log(tmp_path)
+    assert [e.seq for e in events] == list(range(1, len(events) + 1))
+    first = fold(events)
+    assert first.requirement is R.PARTIAL
+    assert states(first) == {"T1": T.ESCALATED, "T2": T.BLOCKED, "T3": T.APPROVED}
+    assert first.tasks["T1"].attempt == 2
+    assert first.tasks["T3"].attempt == 1
+    # the same log, folded again, read again from disk, and round-tripped through JSON, gives the same snapshot
+    assert fold(events) == first
+    from ultron.store import events as ev
+    from ultron.store.eventlog import EventLog, events_path
+
+    reread = EventLog(events_path(tmp_path, REQ)).read(strict=True).events
+    assert reread == events
+    assert fold(reread) == first
+    assert fold([ev.from_json(ev.to_json_line(e)) for e in events]) == first
+    # every prefix replays without error, and the requirement settles exactly at the first escalation record
+    settled_at = None
+    for k in range(len(events) + 1):
+        snap = fold(events[:k])
+        assert fold(events[:k]) == snap
+        if snap.requirement is R.PARTIAL and settled_at is None:
+            settled_at = k
+    assert settled_at is not None
+    assert events[settled_at - 1].type == "escalation"
+    assert events[settled_at - 1].data["ticket"] is None
+    # the later ticket records came after settling and changed nothing
+    later = [e for e in events[settled_at:] if e.type == "escalation"]
+    assert [e.data["ticket"] for e in later] == [None, "AD-4242"]
+    for k in range(settled_at, len(events) + 1):
+        assert fold(events[:k]) == first
+
+
 # --- housekeeping ----------------------------------------------------------------------------------------------
 
 
