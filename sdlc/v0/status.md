@@ -13,6 +13,8 @@
   - The testing agent never runs below R1, and developers never edit `tests/acceptance/` (FR11).
 - **Rungs (self-build only, owner 2026-11-11):** spec §11.4's R0–R5, plus **R6 = Fable 5.2 high**. Fable is used **only** when a task has failed at the highest rung, R5 (Opus max); a task never starts at R6 and doesn't reach it by any other route. `spec.md` is unchanged; ultron itself still keeps Fable off the ladder.
 - Jira is used only on escalation.
+- **MCPs (owner 2026-11-11):** every developer and testing agent prompt includes the task's `mcp` line from `tasks.md`. If it names a connected MCP, the agent must use it for the check it names and report what it saw. If it names one that isn't connected, the agent sets it up only if it costs ₹0 (e.g. `npx`), otherwise says so. `none` means no MCP.
+- **Scheduling (FR6):** no waves. A task starts as soon as all its dependencies are approved, up to `max_parallel`.
 - MCPs connected: Playwright, git, Docker MCP Toolkit, Atlassian Rovo, GitHub.
 
 ## The rerun (owner decision 2026-11-10, lesson L3)
