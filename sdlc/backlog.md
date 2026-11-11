@@ -61,7 +61,7 @@ out how gates, limits and the audit trail would still be enforced, because the b
 - **What:** one shared ultron server that hosts connect to by URL, instead of each user running their own copy (spec
   §5.3).
 - **Why later:** useful for teams sharing one instance. It needs a server, a domain, user login and access control,
-  and its monthly cost must be stated in INR and approved against the ₹12,000 cap first.
+  and its monthly cost must be stated in INR and approved against the ₹4,300 cap first.
 - **Depends on:** team sync and team roles.
 
 ## Team roles and permissions
