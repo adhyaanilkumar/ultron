@@ -127,7 +127,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R3 | First implementation; AC6 intent finished after D28 | Failed (4 tests): `config_change` could make merge/deploy/rollback read as auto; escalation-gate decision accepted for a task not failed/rejected |
 | 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected/call_for_edit/escalated tasks, judged by current state | Failed (10 tests): a non-string mode value in the log crashes `settings()` (unhashable type) |
-| 3 | R5 | Type-check every mode value before comparing; non-strings read as human (snapshot) or are skipped (change) | In progress |
+| 3 | R5 | Type-check every mode value before comparing; non-strings read as human (snapshot) or are skipped (change); D30: refuse a second escalation decision | In progress |
 | 2026-11-11 | attempt | T28 attempt 1 (R1) | engine | fail | 4 failed, 3143 passed: prune crashes against an open reader on Windows; append after a torn tail loses a row; a new attempt shows the old attempt's activity; </untrusted-data> in content closes the wrapper; climb to R2 |
 
 ### T28 · Activity stream and monitor
@@ -135,7 +135,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R1 | First implementation | Failed (4 tests): prune vs open reader on Windows; torn tail swallows the next row; old attempt shown as current; untrusted wrapper can be closed by content |
 | 2 | R2 | Retry the prune replace; repair a torn tail under the lock before appending; filter by attempt and newest start; escape `untrusted-data` tags in content | Failed (9 tests): A–D fixed; new defect: a second prune can lower the high-water mark and cursors get reused |
-| 3 | R3 | Never lower `activity.seq` (write the max of the stored mark and the rows); defang `lines` too | In progress |
+| 3 | R3 | Mark never lowered (`_raise_mark`, atomic write); NFKC look-alike tags defanged; temp files cleaned. `lines` left raw because an acceptance test pins it | Developer green (3238 passed, all 100 of test_t28.py); in testing |
 | 2026-11-11 | settings | agent types (self-build) | adhyaanilkumar | keep general-purpose | per-role agent classes go to a later version (backlog) |
 | 2026-11-11 | attempt | T18 attempt 2 (R3) | engine | fail | 3 failed, 3369 passed: C1 controls reach the prompt; a non-UTF-8 folder name breaks event logging after the call is charged; a BOM-prefixed tasks.md hides the first task; climb to R4 for attempt 3 (last) |
 | 2026-11-11 | attempt | T16 attempt 1 (R3) | engine | fail | 63 failed, 3421 passed: ~58 permission-policy bypasses (git via aliases/eval/wrappers/PowerShell quoting, shell writes to .git and outside the worktree, network via interpreters); usage-limit text matched in the agent's own result; interrupt can take 6-9 s when the session hangs; climb to R4 |
@@ -149,3 +149,4 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | result | T08 D29 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T08 (D29) into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | attempt | T10 attempt 2 (R4) | engine | fail | 10 failed, 3964 passed: a list/object where a gate mode should be crashes settings with TypeError (fails closed); climb to R5 for attempt 3 (last) |
+| 2026-11-11 | spec | D30 escalation gate: one decision | adhyaanilkumar | approve | repeat escalation decisions refused once passed; maintain gate left to T33 |
