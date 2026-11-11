@@ -806,7 +806,7 @@
       },
       "total": 5,
       "rung": "R3",
-      "jira": "",
+      "jira": "AD-437",
       "mcp": {
         "servers": [],
         "reason": "T06 must wrap the `git` CLI; `mcp-server-git` is a host-side tool in early development and can't replace it (Cat 2)"

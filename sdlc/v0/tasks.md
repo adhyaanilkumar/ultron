@@ -220,7 +220,7 @@ Spec §10, FR16, FR17, §5.3 "Updating". The event model (`seq`, time, actor: gi
 - type: feature
 - depends_on: T01
 - ships_independently: yes
-- jira:
+- jira: AD-437 (escalated 2026-11-11: 3 attempts failed, 5 story points)
 - rung: R3 (total 5, raised by Risk 2)
 - mcp: none — T06 must wrap the `git` CLI; `mcp-server-git` is a host-side tool in early development and can't replace it (Cat 2)
 
