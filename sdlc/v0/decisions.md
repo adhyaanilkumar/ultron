@@ -145,3 +145,5 @@ For every task that needs more than one attempt: what each attempt did different
 | 1 | R3 | Denylist permission policy with a quote-aware shell parser; post-call diff check inside the worktree | Failed (63 tests): many policy bypasses; usage-limit misclassified from the agent's text; interrupt over 5 s when the session hangs |
 | 2 | R4 | Deny-by-default Bash allowlist instead of a denylist; outside-worktree and `.git` checks after every call; classify from SDK error fields only; one overall 5 s interrupt budget | In progress |
 | 2026-11-11 | attempt | T28 attempt 2 (R2) | engine | fail | 9 failed, 3202 passed: a second prune lowers activity.seq, so new rows reuse cursors a follower already passed; climb to R3 for attempt 3 (last) |
+| 2026-11-11 | result | T08 D29 | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T08 (D29) into v0-design | adhyaanilkumar | approve | |
