@@ -107,3 +107,7 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | flaky | test_t05 lock test, test_t01 make-lint test | engine | note | each failed once under load in full runs and passed alone and on rerun (lesson L10) |
 | 2026-11-11 | result | T08 D28 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T08 (D28) into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | spec | D29 call_for_edit edge cases | adhyaanilkumar | approve | stop returns to origin; check on every escalation; file with note at cap or after a 2nd round |
+| 2026-11-11 | sent back | T05 (merged; reopens) | adhyaanilkumar | rerun | lock starvation: 1 in ~11 runs of the 4-writer test hangs to the 30 s lock timeout; make the lock fair; R4, not counted |
+| 2026-11-11 | sent back | T08 (merged; reopens) | engine | rerun | D29 transitions (AC7); R3, not counted |
+| 2026-11-11 | plan | AD-437 (T06) | adhyaanilkumar | defer | owner will take AD-437 up at the end |
