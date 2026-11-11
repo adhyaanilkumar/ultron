@@ -181,6 +181,8 @@ For every task that needs more than one attempt: what each attempt did different
 ### T12 · Attempt policy
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
-| 1 | R3 | First implementation (`attempts.py`, `decide()`) | Developer green (6344 passed; only the known T28 test failed); in testing |
+| 1 | R3 | First implementation (`attempts.py`, `decide()`) | Failed (19 tests): capped first rung recorded wrong; path normalisation; restart grants extra attempts |
+| 2 | R4 | Record the rung that ran (capped); `posixpath.normpath` in `_touches`; rebuild the attempt count from the folded status | In progress |
 | 2026-11-11 | result | T28 post-merge test fix | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T28 (test fix) into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | attempt | T12 attempt 1 (R3) | engine | fail | 19 failed: history records the start rung, not the capped rung that ran; `..`, `/./`, `//` paths not normalised for tests_modified; `for_task` drops the folded attempt count, so a restart grants extra attempts; climb to R4 |
