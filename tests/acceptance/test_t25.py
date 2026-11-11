@@ -12,10 +12,12 @@ import json
 import logging
 import re
 import traceback
-from collections.abc import Iterator
+import types
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
+import httpcore
 import httpx
 import pytest
 import respx
@@ -774,3 +776,613 @@ def test_ac8_no_ad_or_personal_data(path: Path) -> None:
         and "emailAddress" not in text
         and "displayName" not in text
     )
+
+
+# ==== Attempt 2 (R4): the whole exception graph, every httpx error class at every step, DEBUG logs, kanban ====
+#
+# These use httpx.MockTransport, not respx: respx re-raises a side effect's exception with its own SideEffectError
+# (holding every recorded request, auth header included) as __cause__, which would be a leak of the test harness,
+# not of ultron. MockTransport raises the handler's exception unchanged, as httpx's real transport does.
+
+ULTRON_PKG = Path(client_module.__file__).resolve().parents[1]
+STEPS = ("types", "create", "attach", "sprint_active", "sprint_future", "move")
+AFTER_CREATE = frozenset({"attach", "sprint_active", "sprint_future", "move"})
+
+
+def _in_ultron(frame: types.FrameType) -> bool:
+    try:
+        return Path(frame.f_code.co_filename).resolve().is_relative_to(ULTRON_PKG)
+    except (OSError, ValueError):
+        return False
+
+
+def reachable_text(root: object) -> list[str]:
+    """Every str or bytes value reachable from `root`.
+
+    Followed: exception `__cause__`, `__context__`, `args`, `__notes__` and attributes; the locals of every traceback
+    frame in ultron's code; containers and mappings (httpx.Headers included); object `__dict__` and `__slots__`;
+    bound methods' `__self__` and closure cells. A JiraClient owns the credentials by design (its httpx client must
+    send them), so it is checked through its repr and str only; any other object holding the token is a leak.
+    """
+    out: list[str] = []
+    seen: set[int] = set()
+    todo: list[object] = [root]
+    while todo:
+        obj = todo.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, str):
+            out.append(obj)
+            continue
+        if isinstance(obj, bytes | bytearray | memoryview):
+            out.append(bytes(obj).decode("latin-1"))
+            continue
+        if isinstance(
+            obj,
+            bool
+            | int
+            | float
+            | complex
+            | type
+            | types.ModuleType
+            | types.BuiltinFunctionType
+            | types.CodeType,
+        ):
+            continue
+        if isinstance(obj, JiraClient):
+            out += [repr(obj), str(obj)]
+            continue
+        if isinstance(obj, types.MethodType):
+            todo.append(obj.__self__)
+            continue
+        if isinstance(obj, types.FunctionType):
+            for cell in obj.__closure__ or ():
+                try:
+                    todo.append(cell.cell_contents)
+                except ValueError:
+                    pass
+            continue
+        if isinstance(obj, types.TracebackType):
+            tb: types.TracebackType | None = obj
+            while tb is not None:
+                todo.append(tb.tb_frame)
+                tb = tb.tb_next
+            continue
+        if isinstance(obj, types.FrameType):
+            if _in_ultron(obj):
+                todo.append(dict(obj.f_locals))
+            continue
+        if isinstance(obj, BaseException):
+            out += [str(obj), repr(obj)]
+            todo += [obj.__cause__, obj.__context__, obj.args, obj.__traceback__]
+            todo.append(getattr(obj, "__notes__", None))
+        if isinstance(obj, Mapping):
+            for k, v in obj.items():
+                todo += [k, v]
+        elif isinstance(obj, list | tuple | set | frozenset):
+            todo.extend(obj)
+        try:
+            todo.append(dict(vars(obj)))
+        except TypeError:
+            pass
+        for cls in type(obj).__mro__:
+            slots = getattr(cls, "__slots__", ())
+            for slot in (slots,) if isinstance(slots, str) else slots:
+                try:
+                    todo.append(getattr(obj, slot))
+                except AttributeError:
+                    pass
+    return out
+
+
+def assert_graph_clean(root: object, where: str = "exception graph") -> None:
+    assert_clean("\n".join(reachable_text(root)), where)
+
+
+def assert_error_clean(exc: BaseException) -> None:
+    assert_graph_clean(exc)
+    assert_exception_clean(exc)
+
+
+def assert_logs_clean(caplog: pytest.LogCaptureFixture) -> None:
+    assert_clean(caplog.text, "logs")
+    for record in caplog.records:
+        assert_clean(record.getMessage(), f"log message from {record.name}")
+        assert_graph_clean(record.__dict__, f"log record from {record.name}")
+
+
+def test_a2_walker_finds_the_token_where_it_would_leak(jira: JiraClient) -> None:
+    # The walker itself must catch the leaks it is meant to catch, or the tests below prove nothing.
+    request = httpx.Request("GET", BASE, headers={"Authorization": f"Basic {BASIC}"})
+    with pytest.raises(AssertionError):
+        assert_graph_clean(httpx.ConnectError("x", request=request))
+    try:
+        try:
+            raise httpx.ConnectError("x", request=request)
+        except httpx.ConnectError:
+            raise JiraUnreachable("hidden") from None
+    except JiraUnreachable as hidden:
+        with pytest.raises(AssertionError):
+            assert_graph_clean(hidden)  # through __context__, as in attempt 1
+    with pytest.raises(JiraError) as in_frame:
+        jira._request("not-an-endpoint", headers={"Authorization": f"Basic {BASIC}"})
+    with pytest.raises(AssertionError):
+        assert_graph_clean(
+            in_frame.value
+        )  # through the locals of ultron's _request frame
+    with pytest.raises(AssertionError):
+        assert_graph_clean(
+            ValueError(JiraCredentials.from_env(env()))
+        )  # _Secret's slot
+    assert_graph_clean(ValueError(jira))  # the client itself is opaque: repr only
+
+
+def _step_of(request: httpx.Request) -> str | None:
+    method, path = request.method, request.url.path
+    if (method, path) == ("GET", TYPES):
+        return "types"
+    if (method, path) == ("POST", CREATE):
+        return "create"
+    if (method, path) == ("POST", ATTACH):
+        return "attach"
+    if (method, path) == ("GET", SPRINTS):
+        return f"sprint_{request.url.params.get('state')}"
+    if method == "POST" and re.fullmatch(r"/rest/agile/1\.0/sprint/\d+/issue", path):
+        return "move"
+    return None
+
+
+class FakeJira:
+    """Jira at the transport level: canned fixture replies, and one step that fails with an error or a reply."""
+
+    def __init__(
+        self,
+        *,
+        fail: str | None = None,
+        error: Callable[[httpx.Request], BaseException] | None = None,
+        reply: Callable[[httpx.Request], httpx.Response] | None = None,
+        sprint: str = "active",
+    ) -> None:
+        self.fail, self.error, self.reply = fail, error, reply
+        self.sprint = "future" if fail == "sprint_future" else sprint
+        self.steps: list[str] = []
+        self.unexpected: list[str] = []
+        self.unauthenticated: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        step = _step_of(request)
+        if step is None:
+            self.unexpected.append(f"{request.method} {request.url.path}")
+            return httpx.Response(418)
+        self.steps.append(step)
+        if request.headers.get("Authorization") != f"Basic {BASIC}":
+            self.unauthenticated.append(step)
+        if step == self.fail:
+            if self.error is not None:
+                raise self.error(request)
+            if self.reply is not None:
+                return self.reply(request)
+        w, s = fixture("issue_write.json"), fixture("sprints.json")
+        if step == "types":
+            return httpx.Response(200, json=fixture("issuetypes_ak.json")["response"])
+        if step == "create":
+            return httpx.Response(201, json=w["create"])
+        if step == "attach":
+            return httpx.Response(200, json=w["attachments"])
+        if step == "sprint_active":
+            return httpx.Response(
+                200, json=s["active" if self.sprint == "active" else "empty"]
+            )
+        if step == "sprint_future":
+            return httpx.Response(
+                200, json=s["future" if self.sprint == "future" else "empty"]
+            )
+        return httpx.Response(204)
+
+    def check(self) -> None:
+        assert self.unexpected == [], f"requests outside the fake: {self.unexpected}"
+        assert self.unauthenticated == [], "every request must carry Basic auth"
+
+
+def escalate_with(fake: FakeJira, tmp_path: Path) -> Any:
+    with JiraClient(
+        JiraCredentials.from_env(env()), transport=httpx.MockTransport(fake)
+    ) as c:
+        return c.escalate(
+            TARGET, issue_type="Bug", body=ticket(), attachments=[log_file(tmp_path)]
+        )
+
+
+def _all_subclasses(cls: type) -> set[type]:
+    out = {cls}
+    for sub in cls.__subclasses__():
+        out |= _all_subclasses(sub)
+    return out
+
+
+HTTPX_ERRORS = sorted(
+    (c for c in _all_subclasses(httpx.HTTPError) if c.__module__.startswith("httpx")),
+    key=lambda c: c.__name__,
+)
+
+
+def test_a2_the_matrix_covers_every_httpx_error_class() -> None:
+    names = {c.__name__ for c in HTTPX_ERRORS}
+    assert names >= {
+        "HTTPError", "RequestError", "TransportError", "TimeoutException", "ConnectTimeout", "ReadTimeout",
+        "WriteTimeout", "PoolTimeout", "NetworkError", "ConnectError", "ReadError", "WriteError", "CloseError",
+        "ProtocolError", "LocalProtocolError", "RemoteProtocolError", "ProxyError", "UnsupportedProtocol",
+        "DecodingError", "TooManyRedirects", "HTTPStatusError",
+    }  # fmt: skip
+
+
+def hostile_error(
+    cls: type[httpx.HTTPError], request: httpx.Request
+) -> httpx.HTTPError:
+    """The worst case: the error holds the authenticated request and its message quotes the header and token."""
+    auth = request.headers["Authorization"]
+    message = f"{cls.__name__} sending Authorization: {auth} (token {TOKEN})"
+    if issubclass(cls, httpx.HTTPStatusError):
+        response = httpx.Response(
+            502, headers={"WWW-Authenticate": auth}, request=request
+        )
+        return cls(message, request=request, response=response)
+    if issubclass(cls, httpx.RequestError):
+        return cls(message, request=request)
+    exc = cls(message)
+    exc.request = request
+    return exc
+
+
+@pytest.mark.parametrize("step", STEPS)
+@pytest.mark.parametrize("error", HTTPX_ERRORS, ids=lambda c: c.__name__)
+def test_a2_every_httpx_error_at_every_step_reaches_no_token(
+    step: str,
+    error: type[httpx.HTTPError],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    fake = FakeJira(fail=step, error=lambda r: hostile_error(error, r))
+    with pytest.raises(JiraError) as info:
+        escalate_with(fake, tmp_path)
+    exc = info.value
+    fake.check()
+    assert fake.steps[-1] == step, "the escalation must stop at the failing step"
+    assert isinstance(exc, JiraUnreachable) is issubclass(error, httpx.TransportError)
+    assert error.__name__ in str(exc)
+    assert exc.__cause__ is None and exc.__context__ is None
+    assert exception_chain(exc) == [exc]
+    assert_error_clean(exc)
+    assert_logs_clean(caplog)
+    assert fake.steps.count("create") == (0 if step == "types" else 1)
+    assert exc.issue_key == ("TEST-1" if step in AFTER_CREATE else None)
+
+
+OTHER_HTTPX_ERRORS: list[Callable[[], Exception]] = [
+    lambda: httpx.InvalidURL("Invalid non-printable ASCII character in URL"),
+    lambda: httpx.CookieConflict("Multiple cookies exist with name=session"),
+    lambda: httpx.StreamError("stream error"),
+    httpx.StreamConsumed,
+    httpx.StreamClosed,
+    httpx.ResponseNotRead,
+    httpx.RequestNotRead,
+]
+OTHER_IDS = ["InvalidURL", "CookieConflict", "StreamError", "StreamConsumed", "StreamClosed",
+             "ResponseNotRead", "RequestNotRead"]  # fmt: skip
+
+
+@pytest.mark.parametrize("step", STEPS)
+@pytest.mark.parametrize("make", OTHER_HTTPX_ERRORS, ids=OTHER_IDS)
+def test_a2_httpx_errors_outside_httperror_at_every_step(
+    step: str,
+    make: Callable[[], Exception],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    fake = FakeJira(fail=step, error=lambda r: make())
+    with pytest.raises(Exception) as info:
+        escalate_with(fake, tmp_path)
+    exc = info.value
+    fake.check()
+    assert_error_clean(exc)
+    assert_logs_clean(caplog)
+    if step in AFTER_CREATE:
+        assert isinstance(exc, JiraError) and not isinstance(exc, JiraUnreachable)
+        assert exc.issue_key == "TEST-1"
+        assert exc.__cause__ is None and exc.__context__ is None
+        assert fake.steps.count("create") == 1
+    else:
+        assert getattr(exc, "issue_key", None) is None
+
+
+ERROR_STATUSES = [400, 401, 403, 404, 409, 413, 429, 500, 502, 503, 504]
+
+
+@pytest.mark.parametrize("step", STEPS)
+@pytest.mark.parametrize("status", ERROR_STATUSES)
+def test_a2_error_status_at_every_step(
+    step: str, status: int, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        # A reply that echoes the auth header back: ultron must not keep the response or its headers.
+        return httpx.Response(
+            status,
+            headers={"WWW-Authenticate": request.headers["Authorization"]},
+            json={"errorMessages": [f"jira says {status}"], "errors": {}},
+        )
+
+    fake = FakeJira(fail=step, reply=reply)
+    if status == 400 and step in {"sprint_active", "sprint_future"}:
+        # A board without sprints (kanban): spec §12 says no active and no planned sprint means the backlog.
+        result = escalate_with(fake, tmp_path)
+        fake.check()
+        assert result.sprint.kind == "backlog"
+        assert result.sprint.sprint_id is None
+        assert "jira says 400" in (result.sprint.reason or "")
+        assert fake.steps[-1] == step and "move" not in fake.steps
+        assert result.to_dict()["sprint"]["kind"] == "backlog"
+        assert_clean(json.dumps(result.to_dict()), "result.to_dict()")
+        assert_clean(result.sprint.describe(), "describe()")
+        assert_graph_clean(result, "result")
+        assert_logs_clean(caplog)
+        return
+    with pytest.raises(JiraError) as info:
+        escalate_with(fake, tmp_path)
+    exc = info.value
+    fake.check()
+    assert exc.status == status
+    assert not isinstance(exc, JiraUnreachable)
+    assert f"jira says {status}" in str(exc)
+    assert fake.steps[-1] == step
+    assert exc.issue_key == ("TEST-1" if step in AFTER_CREATE else None)
+    assert fake.steps.count("create") == (0 if step == "types" else 1)
+    assert exc.__cause__ is None and exc.__context__ is None
+    assert_error_clean(exc)
+    assert_logs_clean(caplog)
+
+
+# ---- Kanban board (400 on the sprint lookup) with the fixture's own body ----
+
+
+def test_a2_kanban_board_goes_to_backlog_with_reason(
+    router: respx.MockRouter, jira: JiraClient, tmp_path: Path
+) -> None:
+    mock_happy(router)
+    no_sprints = fixture("sprints.json")["no_sprints"]
+    lookup = router.get(SPRINTS, params={"state": "active"}).mock(
+        return_value=httpx.Response(no_sprints["status"], json=no_sprints["body"])
+    )
+    future = router.get(SPRINTS, params={"state": "future"})
+    result = jira.escalate(
+        TARGET, issue_type="Bug", body=ticket(), attachments=[log_file(tmp_path)]
+    )
+    assert lookup.call_count == 1 and not future.called
+    assert result.sprint.kind == "backlog"
+    assert "does not support sprints" in (result.sprint.reason or "")
+    assert "backlog" in result.sprint.describe()
+    assert "does not support sprints" in result.sprint.describe()
+    sprint = result.to_dict()["sprint"]
+    assert sprint["kind"] == "backlog" and sprint["id"] is None
+    assert "does not support sprints" in sprint["reason"]
+    assert not [
+        c for c in router.calls if "/rest/agile/1.0/sprint/" in c.request.url.path
+    ]
+    assert len(result.attachments) == 1
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 500, 502, 503])
+@pytest.mark.parametrize("state", ["active", "future"])
+def test_a2_other_sprint_lookup_failures_still_fail_with_key(
+    router: respx.MockRouter, jira: JiraClient, status: int, state: str
+) -> None:
+    mock_happy(router, active=False, future=True)
+    router.get(SPRINTS, params={"state": state}).mock(
+        return_value=httpx.Response(status, json={"errorMessages": ["nope"]})
+    )
+    with pytest.raises(JiraError) as info:
+        jira.escalate(TARGET, issue_type="Bug", body=ticket())
+    assert info.value.status == status
+    assert info.value.issue_key == "TEST-1"
+    assert not isinstance(info.value, JiraUnreachable)
+    assert not [
+        c for c in router.calls if "/rest/agile/1.0/sprint/" in c.request.url.path
+    ]
+
+
+# ---- Re-checks of the two attempt-1 failures ----
+
+
+def test_a2_recheck_attempt1_connect_error_has_no_context(tmp_path: Path) -> None:
+    fake = FakeJira(fail="types", error=lambda r: hostile_error(httpx.ConnectError, r))
+    with pytest.raises(JiraUnreachable) as info:
+        escalate_with(fake, tmp_path)
+    exc = info.value
+    assert exc.__context__ is None and exc.__cause__ is None
+    assert not [
+        a for a in vars(exc).values() if isinstance(a, httpx.Request | httpx.Response)
+    ]
+    assert_error_clean(exc)
+
+
+def test_a2_recheck_attempt1_missing_attachment(
+    router: respx.MockRouter, jira: JiraClient, tmp_path: Path
+) -> None:
+    mock_happy(router)
+    with pytest.raises(JiraError) as info:
+        jira.escalate(
+            TARGET,
+            issue_type="Bug",
+            body=ticket(),
+            attachments=[tmp_path / "missing.log"],
+        )
+    exc = info.value
+    assert exc.issue_key == "TEST-1"
+    assert not isinstance(exc, JiraUnreachable), (
+        "a missing local file isn't worth a retry"
+    )
+    assert "missing.log" in str(exc)
+    assert exc.__cause__ is None and exc.__context__ is None
+    assert len([c for c in router.calls if c.request.url.path == CREATE]) == 1
+    assert not [c for c in router.calls if c.request.url.path == ATTACH]
+    assert_error_clean(exc)
+
+
+def test_a2_missing_attachment_never_leaves_an_unknown_issue(
+    router: respx.MockRouter, jira: JiraClient, tmp_path: Path
+) -> None:
+    # The invariant behind the attempt-1 test: either nothing is created, or the caller learns the key. Refusing
+    # before create (no POST at all) and create-then-raise-with-key both satisfy it.
+    mock_happy(router)
+    good = log_file(tmp_path)
+    with pytest.raises(JiraError) as info:
+        jira.escalate(
+            TARGET,
+            issue_type="Bug",
+            body=ticket(),
+            attachments=[good, tmp_path / "missing.log"],
+        )
+    creates = len([c for c in router.calls if c.request.url.path == CREATE])
+    assert (creates, info.value.issue_key) in {(0, None), (1, "TEST-1")}
+    assert not isinstance(info.value, JiraUnreachable)
+
+
+# ---- DEBUG logs through the real httpx -> httpcore -> h11 path (httpcore's MockBackend replaces the socket) ----
+
+
+class _RecordingStream(httpcore.MockStream):
+    def __init__(self, buffer: list[bytes], sink: bytearray) -> None:
+        super().__init__(buffer)
+        self._sink = sink
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._sink += buffer
+
+
+class _RecordingBackend(httpcore.MockBackend):
+    """Replays canned bytes on one keep-alive connection and records every byte httpcore writes."""
+
+    def __init__(self, buffer: list[bytes]) -> None:
+        super().__init__(buffer)
+        self.replies = list(buffer)
+        self.written = bytearray()
+
+    def connect_tcp(self, *args: Any, **kwargs: Any) -> httpcore.NetworkStream:
+        return _RecordingStream(list(self.replies), self.written)
+
+
+def wire(status: int, body: Any = None) -> bytes:
+    data = b"" if body is None else json.dumps(body).encode()
+    head = f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\n\r\n"
+    return head.encode() + data
+
+
+def real_path_client(backend: _RecordingBackend) -> JiraClient:
+    transport = httpx.HTTPTransport()
+    transport._pool = httpcore.ConnectionPool(network_backend=backend)
+    return JiraClient(JiraCredentials.from_env(env()), transport=transport)
+
+
+def _wire_script(case: str) -> list[bytes]:
+    w, s = fixture("issue_write.json"), fixture("sprints.json")
+    start = [
+        wire(200, fixture("issuetypes_ak.json")["response"]),
+        wire(201, w["create"]),
+    ]
+    scripts = {
+        "happy": [
+            *start,
+            wire(200, w["attachments"]),
+            wire(200, s["active"]),
+            wire(204),
+        ],
+        "kanban": [
+            *start,
+            wire(200, w["attachments"]),
+            wire(400, s["no_sprints"]["body"]),
+        ],
+        "status_401": [wire(401, {"errorMessages": ["Unauthorized"]})],
+        "disconnect_before_create": [],
+        "disconnect_after_create": start,
+        "attach_500": [*start, wire(500, {"errorMessages": ["boom"]})],
+    }
+    return scripts[case]
+
+
+REAL_PATH_EXPECTED: dict[str, tuple[type[JiraError], str | None]] = {
+    "status_401": (JiraError, None),
+    "disconnect_before_create": (JiraUnreachable, None),
+    "disconnect_after_create": (JiraUnreachable, "TEST-1"),
+    "attach_500": (JiraError, "TEST-1"),
+}
+
+
+@pytest.mark.parametrize("case", ["happy", "kanban", *REAL_PATH_EXPECTED])
+def test_a2_debug_logs_through_real_httpcore(
+    case: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    for name in ("httpx", "httpcore", "ultron"):
+        caplog.set_level(logging.DEBUG, logger=name)
+    backend = _RecordingBackend(_wire_script(case))
+    outcome: Any
+    with real_path_client(backend) as c:
+        try:
+            outcome = c.escalate(
+                TARGET,
+                issue_type="Bug",
+                body=ticket(),
+                attachments=[log_file(tmp_path)],
+            )
+        except JiraError as exc:
+            outcome = exc
+    # The token really went through httpcore while its loggers were at DEBUG, so a clean log means something.
+    assert f"Basic {BASIC}".encode() in backend.written
+    assert any(r.name.startswith("httpcore") for r in caplog.records)
+    if backend.replies:  # httpx logs a request line only once a response arrives
+        assert any(r.name.startswith("httpx") for r in caplog.records)
+    assert_logs_clean(caplog)
+    if case in {"happy", "kanban"}:
+        assert not isinstance(outcome, BaseException), f"{case} failed: {outcome!r}"
+        assert outcome.sprint.kind == ("active" if case == "happy" else "backlog")
+        assert_graph_clean(outcome, "result")
+        return
+    kind, key = REAL_PATH_EXPECTED[case]
+    assert isinstance(outcome, kind), f"{case}: got {type(outcome).__name__}"
+    assert outcome.issue_key == key
+    assert outcome.__cause__ is None and outcome.__context__ is None
+    assert_error_clean(outcome)
+
+
+def _httpx_objects_in_ultron_frames(exc: BaseException) -> list[str]:
+    found: list[str] = []
+    tb = exc.__traceback__
+    while tb is not None:
+        frame = tb.tb_frame
+        if _in_ultron(frame):
+            for name, value in frame.f_locals.items():
+                if isinstance(value, httpx.Request | httpx.Response | httpx.HTTPError):
+                    found.append(
+                        f"{frame.f_code.co_name}.{name}: {type(value).__name__}"
+                    )
+        tb = tb.tb_next
+    return found
+
+
+@pytest.mark.parametrize("status", [400, 401, 500])
+@pytest.mark.parametrize("step", ["types", "create", "attach", "move"])
+def test_a2_error_traceback_frames_hold_no_httpx_request_or_response(
+    step: str, status: int, tmp_path: Path
+) -> None:
+    # httpx.Response.request carries the Authorization header; a frame of ultron's that still holds it keeps the
+    # token reachable from the raised error (exc.__traceback__ -> frame -> f_locals), as __context__ did in attempt 1.
+    fake = FakeJira(
+        fail=step, reply=lambda r: httpx.Response(status, json={"errorMessages": ["x"]})
+    )
+    with pytest.raises(JiraError) as info:
+        escalate_with(fake, tmp_path)
+    assert _httpx_objects_in_ultron_frames(info.value) == []
