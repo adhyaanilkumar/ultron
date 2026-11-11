@@ -84,3 +84,4 @@ For every task that needs more than one attempt: what each attempt did different
 | 1 | R1 | First implementation | Owner sent back at result gate: background colour bled into transparent cells |
 | 2 | R1 | Reset colour before every transparent cell | Untested (owner stopped all work) |
 | Rerun (send-back, not counted) | R1 | Tests render through `pyte` with colour state carried across cells; Chrome screenshot check | Passed, merged |
+| 2026-11-11 | stop | T06 attempt 3, T25 attempt 2 testing | engine | rerun | Pro 5-hour usage limit hit; not counted, no climb; resumed from where they stopped |
