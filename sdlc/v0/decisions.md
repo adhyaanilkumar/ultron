@@ -36,3 +36,7 @@
 | 2026-11-11 | settings | Jira for testing | adhyaanilkumar | AK (anil-ws) | tests never use AD (adhya-work); owner then chose AK (anil-ws) instead of a new project; AD stays for real escalations |
 | 2026-11-11 | attempt | T06 attempt 2 (R4, rerun) | engine | fail | 3 failed, 429 passed: merge into a symbolic-ref alias moves a checked-out branch (high); marker-write failure leaves the branch behind (low); climb to R5 for attempt 3 (last) |
 | 2026-11-11 | attempt | T08 attempt 1 (R2) | engine | fail | 2 failed, 1358 passed: repeat escalation record (Jira ticket) after the requirement settles raises IllegalTransition, so the log can't be replayed; climb to R3 |
+| 2026-11-11 | result | T11 attempt 1 | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T13 attempt 1 | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T11 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T13 into v0-design | adhyaanilkumar | approve | |
