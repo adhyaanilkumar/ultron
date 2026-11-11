@@ -16,6 +16,7 @@ from ultron.agents.interface import (
 )
 from ultron.engine.costs import DEFAULT_PRICES, CapLimits, UsageLedger, UsageRecord
 from ultron.store.eventlog import EventLog
+from ultron.store.events import InvalidEventError
 
 LIMITS = RunLimits(model="opus-5.5", effort="high")
 CTX = CallContext("R1", task="T1", attempt=2)
@@ -138,3 +139,45 @@ def test_evaluation_run_cap_is_checked(tmp_path: Path) -> None:
     with pytest.raises(CapRefusedError):
         runner.run(ctx, "developer", "p", tmp_path, [], None, LIMITS)
     assert len(fake.calls) == 1
+
+
+# T18 attempt 3: a hostile (non-Unicode) path must never stop the call from being logged
+
+
+def test_non_utf8_context_values_are_escaped_in_the_event(tmp_path: Path) -> None:
+    runner, fake, log, _ = make(tmp_path, [FakeStep()])
+    entry = {
+        "path": "bad\udc80/CLAUDE.md",
+        "sha256": "0" * 64,
+        "kind": "repo_instruction",
+        "truncated": False,
+    }
+    ctx = CallContext(
+        "R1", context_files=(entry,), context_omitted=("x\udcff/AGENTS.md",)
+    )
+    go(runner, tmp_path, ctx)
+    (e,) = log.read().events
+    assert e.data["context_files"] == [{**entry, "path": "bad\\udc80/CLAUDE.md"}]
+    assert e.data["context_omitted"] == ["x\\udcff/AGENTS.md"]
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize("bad", ["prompt", "role", "requirement", "task"])
+def test_event_it_cannot_write_is_refused_before_the_agent_runs(
+    bad: str, tmp_path: Path
+) -> None:
+    runner, fake, _log, _ = make(tmp_path, [FakeStep()])
+    ctx, role, prompt = CTX, "developer", "the prompt"
+    if bad == "prompt":
+        prompt = "lone \ud800 surrogate"
+    elif bad == "role":
+        role = "Not A Role"
+    elif bad == "requirement":
+        ctx = CallContext("R\udc80")
+    else:
+        ctx = CallContext("R1", task="T\udc80")
+    with pytest.raises(InvalidEventError):
+        runner.run(ctx, role, prompt, tmp_path, ["Read"], None, LIMITS)
+    assert fake.calls == [], "the agent must not run (and be charged) first"
+    assert not (tmp_path / ".ultron").exists()
+    assert not (tmp_path / "events.jsonl").exists()

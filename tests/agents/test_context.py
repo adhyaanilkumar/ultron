@@ -1,8 +1,11 @@
 """T18 AC1 to AC4 and AC6: the context builder, repo instructions, call record, testing isolation and versions."""
 
+import base64
 import hashlib
 import json
+import os
 import shutil
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -531,3 +534,121 @@ def test_instruction_files_past_the_cap_are_recorded_as_omitted(
     )
     (event2,) = [e for e in log2.read().events if e.type == "agent_call"]
     assert "context_omitted" not in event2.data
+
+
+# Attempt 3: defects found by the testing agent
+
+C1 = [chr(c) for c in range(0x80, 0xA0)]
+BIDI = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c"
+
+
+def test_c1_controls_never_reach_the_prompt(repo: Path) -> None:
+    from ultron.agents.context import _fence
+
+    text = "x".join(C1) + " MK-C1\n"
+    write(repo / "CLAUDE.md", text)
+    built = build_context("testing", inputs(repo, diff=text))
+    assert not [c for c in built.prompt if "\x80" <= c <= "\x9f"]
+    assert "\ufffdx\ufffd" in built.prompt  # each C1 control becomes U+FFFD
+    rec = {r["path"]: r["sha256"] for r in built.files_record()}
+    assert rec["CLAUDE.md"] == sha(text)
+    begin = _fence("a\x9b31m\x85b/CLAUDE.md", "ok\n").split("\n")[0]
+    assert begin.startswith("<<<BEGIN DATA a?31m?b/CLAUDE.md sha256=")
+
+
+def test_bidi_controls_stay_in_fences_but_not_in_labels(repo: Path) -> None:
+    from ultron.agents.context import _fence
+
+    lines = _fence(f"pkg{BIDI}/CLAUDE.md", f"keep {BIDI} as data\n").split("\n")
+    assert lines[0].startswith(f"<<<BEGIN DATA pkg{'?' * len(BIDI)}/CLAUDE.md sha256=")
+    assert lines[1] == f"keep {BIDI} as data"
+    folder = repo / "a\u202eevil"
+    folder.mkdir()
+    write(folder / "CLAUDE.md", f"MK-BIDI {BIDI}\n")
+    built = build_context("spec", inputs(repo))
+    for line in built.prompt.split("\n"):
+        if line.startswith("<<<BEGIN DATA"):
+            assert not any(c in line for c in BIDI), ascii(line)
+    assert f"MK-BIDI {BIDI}" in built.prompt
+    assert "a\u202eevil/CLAUDE.md" in {r["path"] for r in built.files_record()}
+
+
+def test_record_paths_are_valid_utf8_and_reversible() -> None:
+    from ultron.agents.context import BuiltContext, ContextFile
+
+    bad = "bad\udc80name/CLAUDE.md"
+    built = BuiltContext(
+        role="spec",
+        prompt="p",
+        prompt_version="spec/v1",
+        files=(
+            ContextFile(bad, "0" * 64, "repo_instruction"),
+            ContextFile("ok/CLAUDE.md", "1" * 64, "repo_instruction"),
+        ),
+        omitted_files=("deep\udcff/AGENTS.md", "fine/AGENTS.md"),
+    )
+    first, second = built.files_record()
+    assert first["path"] == r"bad\udc80name/CLAUDE.md"  # the surrogate as text
+    exact = base64.b64decode(str(first["path_b64"]))
+    assert exact.decode("utf-8", "surrogatepass") == bad
+    assert second == {
+        "path": "ok/CLAUDE.md",
+        "sha256": "1" * 64,
+        "kind": "repo_instruction",
+        "truncated": False,
+    }
+    json.dumps(built.files_record(), ensure_ascii=False).encode("utf-8")
+    ctx = built.call_context("R1")
+    assert ctx.context_omitted == (r"deep\udcff/AGENTS.md", "fine/AGENTS.md")
+    assert [dict(f) for f in ctx.context_files] == built.files_record()
+
+
+def test_non_unicode_folder_name_is_logged(repo: Path, tmp_path: Path) -> None:
+    try:
+        if sys.platform == "win32":
+            folder = repo / "bad\udc80name"
+            folder.mkdir()
+        else:
+            os.mkdir(os.fsencode(repo) + b"/bad\xffname")
+            folder = repo / os.fsdecode(b"bad\xffname")
+        (folder / "CLAUDE.md").write_bytes(b"MK-BAD-NAME\n")
+    except (OSError, ValueError, UnicodeError) as e:
+        pytest.skip(f"cannot create a non-Unicode folder name here: {e}")
+    built = build_context("spec", inputs(repo))
+    built.prompt.encode("utf-8")
+    assert "MK-BAD-NAME" in built.prompt
+    runner, log = _runner(tmp_path / "log")
+    runner.run(
+        built.call_context("R1"),
+        "spec",
+        built.prompt,
+        repo,
+        ["Read"],
+        None,
+        RunLimits(model="sonnet-5.5", effort="high"),
+    )
+    (event,) = [e for e in log.read().events if e.type == "agent_call"]
+    assert len(event.data["context_files"]) == len(built.files_record())
+    (entry,) = [f for f in event.data["context_files"] if "path_b64" in f]
+    real = base64.b64decode(entry["path_b64"]).decode("utf-8", "surrogatepass")
+    assert (repo / real).read_bytes() == b"MK-BAD-NAME\n"
+
+
+@pytest.mark.parametrize(
+    ("bom", "eol"),
+    [("\ufeff", "\n"), ("", "\r\n"), ("\ufeff", "\r\n"), ("", "\r"), ("\ufeff", "\r")],
+    ids=["bom-lf", "crlf", "bom-crlf", "cr", "bom-cr"],
+)
+def test_task_found_with_bom_crlf_or_cr_only(bom: str, eol: str, repo: Path) -> None:
+    lines = ["### T1 First", "- AC1: MK-ONE", "", "### T2 Second", "- AC1: MK-TWO"]
+    lines += ["", "### T3 Third", "- AC1: MK-THREE", ""]
+    raw = (bom + eol.join(lines)).encode("utf-8")
+    (repo / R / "tasks.md").write_bytes(raw)
+    marks = {"T1": "MK-ONE", "T2": "MK-TWO", "T3": "MK-THREE"}
+    for task, mine in marks.items():
+        built = build_context("testing", inputs(repo, task=task, diff="d"))
+        assert mine in built.prompt, task
+        assert not [m for t, m in marks.items() if t != task and m in built.prompt]
+        assert "\ufeff" not in built.prompt
+        (rec,) = [r for r in built.files_record() if r["path"] == f"{R}/tasks.md"]
+        assert rec["sha256"] == hashlib.sha256(raw).hexdigest()

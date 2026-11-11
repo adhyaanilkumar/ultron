@@ -14,6 +14,7 @@ developer's plan, transcripts or attempt reports, and it ignores retry input.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import re
@@ -37,6 +38,7 @@ __all__ = [
     "ContextInputs",
     "Retry",
     "build_context",
+    "record_path",
 ]
 
 INSTRUCTION_NAMES = ("CLAUDE.md", "AGENTS.md")
@@ -58,10 +60,15 @@ MAX_INSTRUCTION_FILES = 50
 _TRUNCATED = "\n[ultron: file cut at 200000 bytes]\n"
 _SECTION_TRUNCATED = "\n[ultron: task section cut at 200000 bytes]\n"
 
-# C0 control characters (tab, LF and CR excepted) and DEL. A NUL breaks subprocess adapters, which pass the prompt
-# as a C string, and escape sequences could rewrite a terminal that shows the prompt.
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_LABEL_CONTROL = re.compile(r"[\x00-\x1f\x7f\u0085  ]")
+# C0 control characters (tab, LF and CR excepted), DEL and the C1 controls. A NUL breaks subprocess adapters, which
+# pass the prompt as a C string, and escape sequences (ESC, or the 8-bit CSI U+009B) could rewrite a terminal that
+# shows the prompt. U+0085 is also a line break.
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+# A fence label (a path) must stay on its BEGIN line and read as it is: no control characters, no line or paragraph
+# separators and no bidi controls (ALM, LRM, RLM, embeddings, overrides and isolates). Paths never need them.
+_LABEL_UNSAFE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]"
+)
 
 _ROLES_WITH_REPO_INSTRUCTIONS = frozenset(
     {"spec", "decomposition", "developer", "testing", "maintenance"}
@@ -121,10 +128,14 @@ class BuiltContext:
     """Repo instruction files found past the cap of 50 and left out of the prompt (paths only, never read)."""
 
     def files_record(self) -> list[dict[str, str | bool]]:
-        """What the call record keeps: each included file's path, SHA-256, kind and whether it was cut."""
+        """What the call record keeps: each included file's path, SHA-256, kind and whether it was cut.
+
+        Every value is valid UTF-8, so the event can always be written. A path that is not valid Unicode also gets a
+        `path_b64` key (see `record_path`).
+        """
         return [
             {
-                "path": f.path,
+                **record_path(f.path),
                 "sha256": f.sha256,
                 "kind": f.kind,
                 "truncated": f.truncated,
@@ -148,7 +159,7 @@ class BuiltContext:
             run=run,
             prompt_version=self.prompt_version,
             context_files=tuple(self.files_record()),
-            context_omitted=self.omitted_files,
+            context_omitted=tuple(_shown(p) for p in self.omitted_files),
         )
 
 
@@ -156,15 +167,39 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _shown(path: str) -> str:
+    """`path` as valid UTF-8: each lone surrogate becomes `\\udcXX` text. A valid-Unicode path is unchanged."""
+    return path.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
+
+def record_path(path: str) -> dict[str, str]:
+    """How the call record keeps `path`: always valid UTF-8 (so logging never fails on a hostile name), and reversible.
+
+    A valid-Unicode path is kept exactly: `{"path": path}`. A name that is not valid Unicode reaches Python as a lone
+    surrogate (an unpaired UTF-16 unit on Windows, a non-UTF-8 byte via `surrogateescape` on POSIX). Then `path` shows
+    each surrogate as `\\udcXX` text and `path_b64` holds the exact path, base64 of its UTF-8 with surrogates passed
+    through: `base64.b64decode(path_b64).decode("utf-8", "surrogatepass")` gives the path back.
+    """
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        exact = path.encode("utf-8", errors="surrogatepass")
+        return {
+            "path": _shown(path),
+            "path_b64": base64.b64encode(exact).decode("ascii"),
+        }
+    return {"path": path}
+
+
 def _clean(text: str) -> str:
-    """Text safe to put in a prompt: no NUL or other control characters, and valid UTF-8 (no lone surrogates)."""
+    """Text safe to put in a prompt: no NUL or other C0/C1 control character, and valid UTF-8 (no lone surrogate)."""
     text = text.encode("utf-8", errors="replace").decode("utf-8")
-    return _CONTROL.sub("�", text)
+    return _CONTROL.sub("\ufffd", text)
 
 
 def _clean_label(label: str) -> str:
-    """A fence label stays on its BEGIN line: line breaks and control characters become `?`."""
-    return _LABEL_CONTROL.sub("?", _clean(label))
+    """A fence label stays on its BEGIN line and reads as it is: line breaks, controls and bidi controls become `?`."""
+    return _clean(_LABEL_UNSAFE.sub("?", label))
 
 
 def _cut(text: str, marker: str) -> tuple[str, bool]:
@@ -300,16 +335,26 @@ class _Builder:
         )
 
 
+# The heading after a task's own: one to three `#` at a line start, then a space, a tab or the line's end. LF, CRLF
+# and a lone CR all end a line.
+_NEXT_HEADING = re.compile(r"(?<=[\r\n])#{1,3}(?=[ \t\r\n]|\Z)")
+
+
 def _task_block(tasks_md: str, task: str) -> str | None:
-    """The `### <task> ...` section of tasks.md, up to the next heading. `T2` does not match `T20`."""
-    head = re.compile(rf"^#{{1,3}}\s+{re.escape(task)}(?![0-9A-Za-z])", re.MULTILINE)
-    match = head.search(tasks_md)
+    """The `### <task> ...` section of tasks.md, up to the next heading. `T2` does not match `T20`.
+
+    A leading BOM is ignored, and LF, CRLF and a lone CR all end a line: Windows tools write both.
+    """
+    text = tasks_md.removeprefix("\ufeff")
+    head = re.compile(
+        rf"(?:\A|(?<=[\r\n]))#{{1,3}}[ \t]+{re.escape(task)}(?![0-9A-Za-z])"
+    )
+    match = head.search(text)
     if match is None:
         return None
-    rest = tasks_md[match.end() :]
-    nxt = re.search(r"^#{1,3}\s", rest, re.MULTILINE)
-    end = match.end() + (nxt.start() if nxt else len(rest))
-    return tasks_md[match.start() : end].rstrip() + "\n"
+    nxt = _NEXT_HEADING.search(text, match.end())
+    end = nxt.start() if nxt else len(text)
+    return text[match.start() : end].rstrip() + "\n"
 
 
 def discover_repo_instructions(
