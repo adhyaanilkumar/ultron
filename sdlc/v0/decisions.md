@@ -165,3 +165,10 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | merge | v0/T28 | engine | resolve | calllog.py conflict with T18: kept T28 live activity and T18 event fields; full suite green (4059 passed) before commit |
 | 2026-11-11 | attempt | T16 attempt 3 (R5, last) | engine | fail | 5 failed, 4436 passed: drive-relative cd (Windows), link names with , = : , cd into a folder made earlier in the call, in-place writes through hard links; max_attempts reached |
 | 2026-11-11 | escalation | T16 → AD-438 | engine | escalate | automatic per owner; Feature under AD-378, sprint SP-105, 3 story points (4 named one-line-ish fixes plus a re-test) |
+| 2026-11-11 | attempt | T36 attempt 1 (R2) | engine | fail | 5 failed, 4155 passed: unvalidated, unlabelled config_snapshot values in ultron_settings; repo text quoted unlabelled in tool errors; C1 controls (OSC/DCS/ST) not stripped; fd 1 still the protocol pipe (child process / os.write leaks into stdout); climb to R3 |
+
+### T36 · MCP server core and read tools
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R2 | First implementation; MCP Inspector used while building | Failed (5 tests): hostile config_snapshot passed on unlabelled; repo text in errors unlabelled; C1 controls kept; stdout fd 1 not protected |
+| 2 | R3 | Validate snapshot values (types and ranges) and label anything repo-derived, errors included; strip all C1 controls; move fd 1 to stderr and write the protocol to a duplicate; children get stdin=DEVNULL | In progress |
