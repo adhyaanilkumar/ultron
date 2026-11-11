@@ -158,3 +158,67 @@ Attempt 1 failed at the testing agent: 2 of 85 acceptance tests in `tests/accept
   checks the walker itself: it must find the header on a raw httpx error, on a hidden `__context__`, and the token
   inside `JiraCredentials`.
 - The broad `except Exception` after create needs `# noqa: BLE001` (ruff's blind-except rule); it is deliberate.
+
+## Attempt 3 (R5)
+Attempt 2 failed at the testing agent: 78 of the acceptance tests in `tests/acceptance/test_t25.py` (commit a8d63f5),
+all one AC4 defect.
+
+### Cause
+`_request` raised the status `JiraError` while its frame still held `response`. The error's `__traceback__` keeps that
+frame, so `exc.__traceback__` → `_request` frame → `f_locals["response"]` → `.request.headers["authorization"]` reached
+`Basic <email:token>`. My walker skipped tracebacks (the risk I wrote down in attempt 2), so my tests passed.
+
+A probe of the attempt-2 code with a walker that follows frames found four more paths of the same kind:
+1. A 2xx body that isn't JSON: `JSONDecodeError` came out of httpx's `Response.json`, whose frame holds the response,
+   and escaped raw before create.
+2. Exceptions from the send that aren't `httpx.HTTPError` (`InvalidURL`, `CookieConflict`, the `StreamError` family,
+   anything else) escaped raw, through httpx frames that hold the request.
+3. `JiraCredentials.from_env` raised `JiraConfigError` (for example a non-https URL) while its frame held the token
+   (`value`, `values`) and `os.environ` (`source`).
+4. A malformed `JIRA_BASE_URL` or a bad proxy variable made `httpx.Client(...)` raise inside `JiraClient.__init__`,
+   whose frame holds the credentials, through httpx's frame holding the `BasicAuth` header.
+
+Also found: a 3xx reply is neither `is_error` nor a success in httpx, so it was parsed as if it were data.
+
+### Fix
+One rule: an exception that leaves the client reaches only plain values. Every httpx object, and everything else that
+holds the token, lives only in a frame that always returns, so no traceback ever holds it.
+1. **`_exchange` (new) is the only code that touches httpx.** It sends, then keeps the status, Jira's error text and
+   the parsed JSON in a `_Reply` of plain values. It catches every `Exception` (`TransportError` means unreachable;
+   anything else keeps only its type name), so it always returns. `_request` raises `JiraError` or `JiraUnreachable`
+   from the `_Reply`, so its frame holds only the name, path, the caller's arguments and the `_Reply`. It returns the
+   parsed JSON, so no caller ever holds a response.
+2. Any status outside 2xx fails with its status. A non-empty 2xx body that isn't JSON is a `JiraError`. An empty body
+   is `None` (204 from move and delete).
+3. **`escalate` after create:** it raises a new error after the `except` blocks, of the same class, with the same
+   method, path and status, plus `issue_key`. The message starts "Jira issue K was created, but a later step failed".
+   It has no cause or context, and its traceback holds `escalate`'s frame but not the frame of the failed step.
+4. **`_read_env` (new)** reads the variables and returns the credentials or an error message. `from_env` raises from a
+   frame that holds neither the token nor `os.environ`. It also checks the base URL with `httpx.URL` (malformed or
+   missing host means a `JiraConfigError` naming `JIRA_BASE_URL`), so a bad URL can't reach `httpx.Client`.
+5. **`_http_client` (new)** builds the httpx client and returns it, or the error's type name. `__init__` deletes
+   `credentials` before it raises `JiraConfigError`.
+
+Kept from attempt 2: AC1–AC3, AC5, AC8, kanban → backlog, `issue_key` on failures after create.
+
+### Risks
+- After create, the inner traceback is dropped. The message keeps the method, path and status of the failed step.
+- A `KeyboardInterrupt` during a send unwinds through `_exchange` with the request in its frame. ultron doesn't raise
+  it, and a traceback prints locals only when asked.
+- A mapping passed as `environ` (tests do) stays in the caller's frames and in `JiraClient.from_env`'s argument. It
+  belongs to the caller. In production nothing is passed, and the client reads `os.environ` itself.
+- `self` in a method's frame is the client, which must hold the credentials to send them. Walkers see it only through
+  its repr, which hides them.
+- Before create, a 2xx body that isn't JSON is now a `JiraError`, where attempt 2 let a raw `JSONDecodeError` escape.
+
+### Proof
+| Defect | Test (red on the attempt-2 code first, then green) |
+|---|---|
+| walker | `tests/jira/test_client.py`: `_reachable_text` now follows `__traceback__` frames from ultron's outermost frame inward (ultron's frames and the library frames below them). It skips the caller's frames above, sees a `JiraClient` only through its repr, and also reports any httpx or httpcore object it reaches. `test_reachable_text_finds_the_header_in_a_raw_httpx_error` gains the frame cases. |
+| main | `::test_error_status_holds_no_auth[step-status]` (each step × 400/401/500; the reply echoes the header) and `::test_public_method_errors_hold_no_auth[...]` (`issue_types`, `create_issue`, `attach`, `choose_sprint`, `move_to_sprint`, `get_issue`, `delete_issue` on 500) |
+| 1 | `::test_non_json_body_is_a_jira_error[types/sprints]` |
+| 2 | `::test_other_send_errors_are_wrapped[...]` (`InvalidURL`, `CookieConflict`, `StreamClosed`, `RuntimeError`) before and after create |
+| 3 | `::test_config_errors_hold_no_token[...]` with the variables in `os.environ` (http URL, malformed URL, no host) |
+| 4 | `::test_client_setup_error_holds_no_token` (a bad `HTTPS_PROXY`) |
+| 3xx | `::test_redirect_is_an_error` |
+| all | `tests/acceptance/test_t25.py`, all passing; `make build`, `make lint`, `make test` |
