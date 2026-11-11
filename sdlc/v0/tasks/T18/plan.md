@@ -46,3 +46,15 @@ Edited (additive, optional fields only):
 - AC4: `test_testing_never_sees_developer_reasoning`.
 - AC5: `tests/agents/test_schemas.py`: good and bad sample per role, plus infrastructure rule.
 - AC6: `test_prompt_version_reaches_agent_call_event`: runs `LoggingRunner` with a fake runner, reads the event.
+
+## Attempt 2 (R3)
+Attempt 1 failed 3 of 118 acceptance tests (commit 4e4d27f). Causes and fixes, same files as above (`context.py`, `prompts.py`, additive `calllog.py`):
+1. **Task past 200 000 bytes of tasks.md not found.** `read()` cut the file before `_task_block` searched it. Fix: the task section reads the whole file, finds the section, then cuts only the section if it is over 200 000 bytes (marked in the prompt, `truncated` true in the record). The hash stays over the whole file.
+2. **No rule for telling the real end of a fence.** Rule 1 in the common template now says a fence ends only at the END line that repeats the opening `sha256` mark; any other END line is data. The prompt version stays `<role>/v1`: v1 has never shipped, and the acceptance tests pin `developer/v1`.
+3. **NUL bytes reached the prompt.** Every fenced text is cleaned before fencing: NUL and other C0 control characters (except tab, LF, CR) and DEL become U+FFFD, and lone surrogates are replaced, so the prompt is always valid UTF-8 a subprocess can carry. The fence mark is over the cleaned text; the recorded hash is over the raw bytes. Fence labels (paths) get the same cleaning plus line breaks, so a hostile folder name cannot add a line outside a fence.
+Also (tester's observations):
+- `files_record()` entries carry `truncated` (bool). `CallContext.context_files` is typed to allow it.
+- Instruction files past the first 50 are no longer dropped silently: `BuiltContext.omitted_files` lists them, the prompt says how many were left out, and `LoggingRunner` writes them as `context_omitted` in the `agent_call` event (only when there are any).
+
+Order: tests reproducing each defect in `tests/agents/test_context.py` (red), then the fixes, then `make build`, `make lint`, `make test`.
+Proof: `test_task_section_found_past_200kb`, `test_long_task_section_is_cut_and_flagged`, `test_every_template_states_the_matching_sha256_end_rule`, `test_nul_and_control_bytes_never_reach_the_prompt`, `test_hostile_label_cannot_break_a_line`, `test_files_record_has_truncated_flag`, `test_instruction_files_past_the_cap_are_recorded_as_omitted`, and all of `tests/acceptance/test_t18.py`.
