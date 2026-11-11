@@ -40,3 +40,28 @@ Edited: none. No new dependencies, so `uv.lock` and `pyproject.toml` stay as the
 | AC4 maintenance default is `patch` | `test_default_bump_maintenance_is_patch`; also checks a feature kind returns `None` |
 | AC5 invalid versions raise a clear error | `test_parse_rejects_invalid`, parametrized over `"1.2"`, `"v1.2.3"`, `"1.2.3.4"`, `"01.2.3"`, `""`; checks `ValueError` and that the message contains the input |
 | Whole task | `make test` ends with `All tests passed`; `make lint` ends with `Lint succeeded`; `make build` ends with `Build succeeded` |
+
+## Rerun after the tasks.md revision (R0)
+
+The owner sent the work back to decomposition. The revision (commit 395e051) added `verify_with` to each criterion and `mcp: none` to the task. The criterion wording is unchanged. Checked against the attempt-1 code.
+
+Changes in this rerun:
+- `tests/acceptance/test_t14.py` (written by the testing agent, not by me) now exists. It covers AC1 to AC5 with more cases: the bump table, invalid inputs such as `1.2.3\n`, `-1.2.3`, `1..3`, and the errors from `bump` and `current_version`. Every test passed on the attempt-1 code (`uv run pytest tests/acceptance/test_t14.py tests/engine`: 49 passed).
+- No code change is planned. The attempt-1 code already meets every criterion, and the task says to keep it.
+
+Files that change: this `plan.md` only. If lint or build fails, the fix goes in `src/ultron/engine/version.py` and the rerun plan is updated in the same commit.
+
+Proof, per criterion, using its `verify_with`:
+| AC | verify_with | Proof on the attempt-1 code |
+|---|---|---|
+| AC1 bump resets lower parts | `pytest` on `tests/engine/test_version.py` | `test_bump` cases, and `test_acceptance` AC1 table |
+| AC2 no releases gives `0.0.0` | `pytest` on `tests/engine/test_version.py` | `test_current_version_empty_is_0_0_0` |
+| AC3 `release_bump` takes largest | `pytest` on `tests/engine/test_version.py` | `test_release_bump_takes_largest` |
+| AC4 maintenance default `patch` | `pytest` on `tests/engine/test_version.py` | `test_default_bump_maintenance_is_patch` |
+| AC5 invalid versions raise | `pytest` on `tests/engine/test_version.py` | `test_parse_rejects_invalid`, plus the acceptance file's invalid list |
+| Whole task | `make build`, `make lint`, `make test` | Run from the worktree root; results go in the report |
+
+Risks:
+- The acceptance file's `test_ac5_invalid` also passes `"1.2.3\n"`. `re.fullmatch` rejects it, so no change is needed.
+- Ruff and mypy also check `tests/acceptance/` (the whole repo is linted). If the testing agent's file breaks lint, that's a finding for the testing agent, not a reason to edit it.
+- The `mcp: none` line means no MCP check applies to T14.
