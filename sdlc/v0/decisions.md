@@ -125,3 +125,10 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R3 | First implementation; AC6 intent finished after D28 | Failed (4 tests): `config_change` could make merge/deploy/rollback read as auto; escalation-gate decision accepted for a task not failed/rejected |
 | 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected tasks | In progress |
+| 2026-11-11 | attempt | T28 attempt 1 (R1) | engine | fail | 4 failed, 3143 passed: prune crashes against an open reader on Windows; append after a torn tail loses a row; a new attempt shows the old attempt's activity; </untrusted-data> in content closes the wrapper; climb to R2 |
+
+### T28 · Activity stream and monitor
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R1 | First implementation | Failed (4 tests): prune vs open reader on Windows; torn tail swallows the next row; old attempt shown as current; untrusted wrapper can be closed by content |
+| 2 | R2 | Retry the prune replace; repair a torn tail under the lock before appending; filter by attempt and newest start; escape or randomise the untrusted delimiter | In progress |
