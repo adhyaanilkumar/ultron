@@ -12,7 +12,8 @@ A **trigger** is a string. Most are the event type (`plan_drafted`). A gate deci
 - `agent_held`: `agent.stopped` with `then=hold` (the default). `task_resumed` returns to where the task was held;
 - `dependency_escalated`: derived, a `pending` task behind an `escalated` or `blocked` task becomes `blocked`.
 
-Requirements settle by themselves: `all_approved`, `partly_approved` or `none_approved`.
+Requirements settle by themselves: `all_approved`, `partly_approved` or `none_approved`. After that, task events
+are illegal, except a repeated `escalation` record for an already escalated task (the Jira key, spec §12): a no-op.
 Event types outside this vocabulary (`intake`, `agent_call`, `config_snapshot`, merge and deploy gates) are ignored.
 """
 
@@ -327,11 +328,15 @@ def _apply_task(
     if event.type == "task_created":
         _create_task(event, name, requirement, tasks)
         return
+    status = tasks.get(name)
+    if event.type == ESCALATION and status is not None and status.state is T.ESCALATED:
+        # A later record of the same escalation (the Jira key, its sprint placement, a retried filing; spec §12).
+        # It usually arrives after the requirement settled, so it is a no-op whatever the requirement's state.
+        return
     if requirement is not R.IN_PROGRESS:
         raise IllegalTransition(
             f"illegal transition: {event.type} for {name} while the requirement is {requirement.value}"
         )
-    status = tasks.get(name)
     if status is None:
         raise IllegalTransition(f"{event.type} for unknown task {name}")
 
@@ -339,8 +344,6 @@ def _apply_task(
     attempt = status.attempt
     held_from = status.held_from
     if event.type == ESCALATION:
-        if status.state is T.ESCALATED:
-            return  # a later record of the same escalation, e.g. the Jira key
         trigger = "escalation"
     elif event.type == ATTEMPT_FINISHED:
         outcome = event.data.get("outcome")

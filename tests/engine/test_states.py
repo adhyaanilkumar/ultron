@@ -422,6 +422,43 @@ def test_repeat_escalation_is_a_noop_but_an_approved_task_cannot_escalate() -> N
         fold(log.events)
 
 
+def test_ticket_record_after_a_single_task_requirement_escalated() -> None:
+    """Spec §12: the Jira key is recorded after the task escalates, here after the requirement settled."""
+    log = Log().to_in_progress({"T1": []}, max_attempts=1)
+    log.plan_approved("T1").attempt("T1", 1, "failed")
+    log.add("escalation", "T1", 1, reason="max_attempts", ticket=None)
+    assert fold(log.events).requirement is R.ESCALATED
+    log.add("escalation", "T1", 1, reason="max_attempts", ticket="AD-401")
+    snap = fold(log.events)
+    assert snap.requirement is R.ESCALATED
+    assert snap.tasks["T1"].state is T.ESCALATED
+
+
+def test_ticket_record_after_the_last_task_escalated_to_partial() -> None:
+    log = Log().to_in_progress({"T1": [], "T2": []}).approved("T1")
+    log.escalated_after_reject("T2")
+    before = fold(log.events)
+    assert before.requirement is R.PARTIAL
+    log.add("escalation", "T2", reason="rejected", ticket="AD-402")
+    log.add("escalation", "T2", reason="rejected", ticket="AD-402", sprint="active")
+    assert fold(log.events) == before
+
+
+def test_first_escalation_after_the_requirement_settled_is_illegal() -> None:
+    log = Log().to_in_progress({"T1": [], "T2": []}).approved("T1")
+    log.escalated_after_reject("T2")
+    log.add("escalation", "T1", reason="too late")
+    with pytest.raises(IllegalTransition, match="partial"):
+        fold(log.events)
+
+
+def test_repeat_escalation_of_an_unknown_task_is_illegal() -> None:
+    log = Log().to_in_progress({"T1": []}).escalated_after_reject("T1")
+    log.add("escalation", "T9", reason="rejected", ticket="AD-403")
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
 # --- AC2: folding twice gives the same state ---------------------------------------------------------------------
 
 
