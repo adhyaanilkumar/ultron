@@ -24,6 +24,7 @@ from ultron.engine.costs import (
     UsageRecord,
     check_cap,
 )
+from ultron.monitor.activity import append_activity
 from ultron.store import events as ev
 from ultron.store.eventlog import EventLog
 
@@ -98,6 +99,7 @@ class LoggingRunner:
 
         def tee(event: ActivityEvent) -> None:
             seen.append(event)
+            self._append_activity(context, role, [event])
             if on_activity is not None:
                 on_activity(event)
 
@@ -118,7 +120,8 @@ class LoggingRunner:
         rel = self._write_transcript(
             context, role, prompt, limits, result, activity, cost
         )
-        self._append_activity(context, role, activity)
+        if not seen:  # the adapter did not stream, so write what it reported at the end
+            self._append_activity(context, role, activity)
         self._log.append(
             ev.agent_call(
                 context.requirement,
@@ -179,16 +182,14 @@ class LoggingRunner:
     def _append_activity(
         self, context: CallContext, role: str, activity: Sequence[ActivityEvent]
     ) -> None:
-        if not activity:
-            return
-        self._dir.mkdir(parents=True, exist_ok=True)
-        with (self._dir / "activity.jsonl").open("a", encoding="utf-8") as fh:
-            for event in activity:
-                row = {
-                    "role": role,
-                    "requirement": context.requirement,
-                    "task": context.task,
-                    "attempt": context.attempt,
-                    **event.to_dict(),
-                }
-                fh.write(json.dumps(row) + "\n")
+        rows = [
+            {
+                "role": role,
+                "requirement": context.requirement,
+                "task": context.task,
+                "attempt": context.attempt,
+                **event.to_dict(),
+            }
+            for event in activity
+        ]
+        append_activity(self._dir, rows)

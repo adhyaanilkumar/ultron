@@ -1,0 +1,150 @@
+"""`<ultron_dir>/activity.jsonl`: the local, uncommitted stream of what ultron agents do (spec section 9.1).
+
+Every row carries a cursor `n`, an integer that only goes up. Writers (any process) take a file lock, give the
+rows the next numbers and append them in one write, so file order is cursor order. The highest number ever given is
+kept in `activity.seq`, so cursors stay valid after pruning, even when pruning empties the file. Readers take no
+lock and never write; a half-written last line is ignored.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from ultron.engine.states import RequirementState, fold
+from ultron.store._filelock import FileLock
+from ultron.store.eventlog import EventLog, EventLogError, events_path
+
+__all__ = ["append_activity", "prune", "read_activity"]
+
+ACTIVITY_FILE = "activity.jsonl"
+SEQ_FILE = "activity.seq"
+RETENTION = timedelta(days=7)
+_FINISHED = {RequirementState.COMPLETE, RequirementState.PARTIAL}
+
+
+def _lock(ultron_dir: Path) -> FileLock:
+    return FileLock(ultron_dir / "locks" / "activity.lock", timeout=60.0)
+
+
+def _parse(data: bytes) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in data.split(b"\n")[:-1]:  # the part after the last newline is unfinished
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get("n"), int):
+            rows.append(row)
+    return rows
+
+
+def _read_bytes(path: Path) -> bytes:
+    for attempt in range(20):
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return b""
+        except OSError:  # replaced by a prune at this moment (Windows)
+            if attempt == 19:
+                raise
+            time.sleep(0.01)
+    return b""
+
+
+def _high_water(ultron_dir: Path) -> int:
+    best = 0
+    try:
+        best = int((ultron_dir / SEQ_FILE).read_text(encoding="ascii").strip() or 0)
+    except (OSError, ValueError):
+        pass
+    rows = _parse(_read_bytes(ultron_dir / ACTIVITY_FILE))
+    return max([best, *(int(r["n"]) for r in rows)])
+
+
+def append_activity(ultron_dir: Path | str, rows: Sequence[Mapping[str, Any]]) -> int:
+    """Append rows, numbering them with the next cursors; return the last cursor given (0 if no rows)."""
+    base = Path(ultron_dir)
+    if not rows:
+        return _high_water(base)
+    base.mkdir(parents=True, exist_ok=True)
+    with _lock(base):
+        n = _high_water(base)
+        lines: list[str] = []
+        for row in rows:
+            n += 1
+            lines.append(json.dumps({**row, "n": n}))
+        payload = ("\n".join(lines) + "\n").encode("utf-8")
+        fd = os.open(
+            base / ACTIVITY_FILE,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0),
+            0o644,
+        )
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(fd, view) :]
+        finally:
+            os.close(fd)
+        (base / SEQ_FILE).write_text(str(n), encoding="ascii")
+    return n
+
+
+def read_activity(ultron_dir: Path | str, since: int = 0) -> list[dict[str, Any]]:
+    """Rows with a cursor above `since`, in order. Reads only."""
+    rows = _parse(_read_bytes(Path(ultron_dir) / ACTIVITY_FILE))
+    return [r for r in rows if int(r["n"]) > since]
+
+
+def _completed_at(root: Path, requirement: str) -> datetime | None:
+    try:
+        events = EventLog(events_path(root, requirement)).read().events
+        if not events or fold(events).requirement not in _FINISHED:
+            return None
+        return datetime.fromisoformat(events[-1].time)
+    except (EventLogError, ValueError, OSError):
+        return None
+
+
+def prune(
+    root: Path | str,
+    ultron_dir: Path | str,
+    *,
+    now: datetime | None = None,
+    retention: timedelta = RETENTION,
+) -> int:
+    """Drop activity of requirements completed more than `retention` ago; return how many rows went."""
+    repo, base = Path(root), Path(ultron_dir)
+    moment = now if now is not None else datetime.now(UTC)
+    if not (base / ACTIVITY_FILE).exists():
+        return 0
+    with _lock(base):
+        data = _read_bytes(base / ACTIVITY_FILE)
+        rows = _parse(data)
+        decided: dict[str, bool] = {}
+
+        def expired(requirement: str) -> bool:
+            if requirement not in decided:
+                done = _completed_at(repo, requirement)
+                decided[requirement] = done is not None and moment - done > retention
+            return decided[requirement]
+
+        keep = [r for r in rows if not expired(str(r.get("requirement", "")))]
+        removed = len(rows) - len(keep)
+        if removed:
+            if rows:
+                (base / SEQ_FILE).write_text(
+                    str(max(int(r["n"]) for r in rows)), encoding="ascii"
+                )
+            text = "".join(json.dumps(r) + "\n" for r in keep)
+            tmp = base / (ACTIVITY_FILE + ".tmp")
+            tmp.write_bytes(text.encode("utf-8"))
+            os.replace(tmp, base / ACTIVITY_FILE)
+    return removed
