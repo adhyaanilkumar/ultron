@@ -45,7 +45,9 @@ wait, polls, hold time, and the time of each step inside the lock. CPU load came
    replaced or deleted in between (`os.stat(path)` and `os.fstat(handle)` give a different `st_dev`/`st_ino`, or no
    file), it reopens under the lock, as today. Writing is unchanged: write-only append, one `os.write`, `fsync`.
    There's no API or file-format change.
-2. **`_filelock.py`: a turn lock, so the next waiter is served before the releaser can return.** Every `acquire`
+2. **`_filelock.py`: a turn lock, so the next waiter is usually served before the releaser can return.** Barging
+   is reduced, not eliminated: if no waiter has taken the turn lock by the time the holder releases (all of them
+   between polls, or not yet scheduled), the releaser can still take both locks straight back. Every `acquire`
    first takes the **turn lock**, a second lock on a sibling file (`R1.events.lock` → `R1.events.turn.lock`). Holding
    it, it waits for the main lock, then lets the turn lock go. A writer that just released has to get the turn lock
    too, and a waiter usually already holds it, so the waiter goes next. Waiters poll the turn lock at a jittered
@@ -65,8 +67,8 @@ Options weighed:
 - **Ticket or queue scheme** (a counter plus a lock per waiter so dead waiters can be skipped). It gives strict FIFO
   order but needs a shared counter, detection of dead ticket holders and clean-up. That's too much machinery for
   what it adds over the turn lock.
-- **Chosen: fix 1 plus the turn lock.** Fix 1 removes the main cause, and the turn lock removes barging, using only
-  the primitives already in use.
+- **Chosen: fix 1 plus the turn lock.** Fix 1 removes the main cause, and the turn lock makes barging rare (not
+  impossible; see fix 2), using only the primitives already in use.
 
 ### Files that change (reopen)
 - `src/ultron/store/eventlog.py`: `append` opens the read handle before the lock. `_last_seq` reads through a handle
@@ -132,7 +134,9 @@ Options weighed:
 - **Risk 1, revised.** Any process with a live `EventLog` that has appended keeps a read handle on that log. On
   Windows, deleting the log and writing a new one (git) works, and the next append follows the new file (tested).
   An atomic `os.replace` onto the log fails while such a handle is open, as it already does while any reader has
-  the file open. T07 should reset with git or delete-then-write, not `os.replace`. Note for T07.
+  the file open. T07 should reset with git or delete-then-write, not `os.replace`. Note for T07. That includes an
+  `EventLog` whose append failed (`LockTimeout`, `TruncatedLogError`, `CorruptLogError`, an invalid event): it keeps
+  the handle it opened until the object is gone.
 - **Risk 5, revised.** One scan per writer object instead of one per append. `_winapi` is a private stdlib module
   (multiprocessing and asyncio use it), and typeshed covers it.
 - **Also added:** a test that a kept reader follows a log deleted and recreated, and one that a fresh object opens
@@ -162,6 +166,25 @@ mount): `LOCK_BACKEND fcntl`, `mypy src` no issues, `tests/store` plus `test_t05
 6 of 6 green (hand-offs on 100%, waits at most 0.38 s). The new tests over HEAD's store modules were red 3 of 3 (6
 failed each time). There the old code's waits stayed under 2 s (0.39-1.0 s); the hand-off check (8-12%) caught it.
 That is evidence, not the `ci` proof: AC2 `ci` and AC6 are still ci-blocked (no remote).
+
+### Stress test stabilised (after the testing agent's run)
+The testing agent passed every criterion (`fe314a9`), but `test_writers_take_turns_under_load` failed 2 of its 14
+Windows runs: hand-off ratio 0.00 once in a full `make test` and 0.33 once alone. Its timing showed why: writers saw
+the start within 1-27 ms, but some reached `FileLock.acquire` 0.2-0.55 s later, after the scanned read-open. A
+writer that started before the log existed skipped that open and did all 100 appends before anyone else appended,
+so the window "while all write" was empty. The fault was the test's setup: the writers didn't start equal.
+- The test now creates the log first. Each writer makes one warm-up append (its object opens and keeps its reader)
+  before it says ready. Warm-ups are excluded.
+- Each measured event records `time.monotonic()` (system-wide on both OSes) just before `append`. Hand-offs are
+  counted from the first append made after the last writer first asked for the lock. That moment is entering
+  `acquire`, not getting it, so a writer kept waiting still counts as barging, while a writer that started late
+  doesn't.
+- `src` is unchanged. Pre-fix store modules (as at `40b76f2`): red 4 of 4 (hand-offs on 21-41%, and waits of 3.5-8.5 s in
+  3 of them). Fixed code, alone: 30 of 30 green (hand-offs on 99-100%, longest lock wait 0.05-0.70 s, 2.3-5.8 s per
+  run).
+- The developer commit's message (`6acb6cb`) says a waiter goes before the releaser. That's the usual case, not a
+  guarantee (fix 2).
+- `make test` twice in PowerShell, both `3156 passed, 7 skipped` and `All tests passed`.
 
 ## Rerun after the tasks.md revision (2026-11-11)
 The owner sent the work back to decomposition (lesson L3). `tasks.md` now gives each criterion a `verify_with`, gives

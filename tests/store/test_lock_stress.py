@@ -10,9 +10,13 @@ Found on Windows under load: 4 writers × 50 appends sometimes took 27-50 s inst
   again, so one writer could hold it 37 times in a row while another waited ~30 s.
   `test_writers_take_turns_under_load` runs 6 writers × 100 appends in tight loops with every CPU busy. It bounds
   each writer's longest single wait in `FileLock.acquire` (starvation) and checks, from the log's own order, how
-  often the lock changed hands while all six were writing (barging). Calibrated on the reopen machine (24 CPUs,
-  24 busy processes): with the fix, waits of 0.05-0.6 s and a hand-off on 95-100% of appends; before it, waits
-  of 1.1-10 s and hand-offs on 11-42%.
+  often the lock changed hands while all six were asking for it (barging). Calibrated on the reopen machine (24
+  CPUs, 24 busy processes): with the fix, waits of 0.05-0.6 s and a hand-off on 95-100% of appends; before it,
+  waits of 1.1-10 s and hand-offs on 11-42%. Barging is rarer with the fix, not impossible, hence a ratio.
+  Stabilised after the tester saw it fail 2 of 14 runs: a writer that started before the log existed skipped the
+  (scanned) read-open and did all its appends while the others were still opening the log. Now the log exists
+  first, each writer warms up (one append, which opens and keeps its reader) before the start, and hand-offs are
+  counted only from when the last writer first asked for the lock.
 """
 
 import builtins
@@ -37,28 +41,31 @@ DEADLINE_S = 110  # a guard against hangs, not a speed limit: the run takes 1-2 
 WRITERS = 6
 PER_WRITER = 100
 MAX_LOCK_WAIT_S = 2.0  # the longest single wait in `FileLock.acquire`, for any writer
-MIN_HANDOFF_RATIO = (
-    0.6  # of consecutive appends while all write, the share made by different writers
-)
+# of consecutive appends while all six are asking for the lock, the share made by different writers
+MIN_HANDOFF_RATIO = 0.6
 WORST_APPEND_S = 15.0  # the slowest `append`, far below the 30 s lock timeout
 
 
-def handoff_ratio(writers: list[str]) -> float:
-    """How often consecutive appends come from different writers, up to the first writer's last append."""
+def handoff_ratio(writers: list[str], start: int = 0) -> float:
+    """How often consecutive appends come from different writers, from index `start` (all writers are asking
+    for the lock) up to the first writer's last append. 0.0 if that window has no pair."""
     last = {w: i for i, w in enumerate(writers)}
     cut = min(last.values()) + 1
-    if cut < 2:
+    pairs = range(max(start, 0) + 1, cut)
+    if not pairs:
         return 0.0
-    return sum(writers[i] != writers[i - 1] for i in range(1, cut)) / (cut - 1)
+    return sum(writers[i] != writers[i - 1] for i in pairs) / len(pairs)
 
 
 def test_handoff_ratio_counts_only_while_all_write() -> None:
     assert handoff_ratio(list("ababab") + ["b"] * 20) == 1.0
-    assert (
-        handoff_ratio(list("aaabbb")) == 0.0
-    )  # `a` finished first, before any hand-off
+    # `a` finished first, before any hand-off
+    assert handoff_ratio(list("aaabbb")) == 0.0
     assert handoff_ratio(list("aabab") + ["b"] * 9) == pytest.approx(2 / 3)
     assert handoff_ratio(list("a")) == 0.0
+    # from `start` on: the run of `a` before `b` asked for the lock is not counted
+    assert handoff_ratio(list("aaaabab") + ["b"] * 5, start=3) == 1.0
+    assert handoff_ratio(list("aaab"), start=3) == 0.0  # `a` was done before `b` asked
 
 
 def _new(i: int, **data: Any) -> NewEvent:
@@ -232,6 +239,10 @@ def timed_acquire(self):
         waits.append(time.monotonic() - started)
 FileLock.acquire = timed_acquire
 log = EventLog(path, lock, lock_timeout=float(sys.argv[7]))
+# Warm-up before the start: this object opens (and keeps) its read handle now, so no writer pays that scanned
+# open after the start while another, which skipped it, races ahead.
+log.append(NewEvent(actor="engine", type="probe", requirement="R1", data={"w": w, "i": -1, "t": 0.0}))
+waits.clear()
 ready.touch()
 end = time.monotonic() + 40
 while not go.exists():
@@ -240,8 +251,8 @@ while not go.exists():
     time.sleep(0.001)
 worst = 0.0
 for i in range(n):
-    started = time.monotonic()
-    log.append(NewEvent(actor="engine", type="probe", requirement="R1", data={"w": w, "i": i}))
+    started = time.monotonic()  # when this writer asks for the lock; the clock is system-wide
+    log.append(NewEvent(actor="engine", type="probe", requirement="R1", data={"w": w, "i": i, "t": started}))
     worst = max(worst, time.monotonic() - started)
 print(json.dumps({"worst_s": worst, "wait_s": max(waits)}))
 """
@@ -269,6 +280,12 @@ def test_writers_take_turns_under_load(tmp_path: Path) -> None:
     go = tmp_path / "go"
     ready = [tmp_path / f"ready-{w}" for w in range(WRITERS)]
     deadline = time.monotonic() + DEADLINE_S
+    # The log exists before any writer starts, so every writer's warm-up opens (and keeps) a reader.
+    EventLog(path, lock).append(
+        NewEvent(
+            actor="engine", type="probe", requirement="R1", data={"w": "seed", "i": -1}
+        )
+    )
     burners = [_spawn(BURNER, str(DEADLINE_S)) for _ in range(os.cpu_count() or 2)]
     procs = [
         _spawn(
@@ -300,14 +317,24 @@ def test_writers_take_turns_under_load(tmp_path: Path) -> None:
                 proc.communicate()
 
     events = EventLog(path, lock).read(strict=True).events
-    assert [e.seq for e in events] == list(range(1, WRITERS * PER_WRITER + 1))
+    total = 1 + WRITERS + WRITERS * PER_WRITER  # seed, warm-ups, measured appends
+    assert [e.seq for e in events] == list(range(1, total + 1))
     for w in range(WRITERS):
-        assert [e.data["i"] for e in events if e.data["w"] == str(w)] == list(
-            range(PER_WRITER)
-        )
-    ratio = handoff_ratio([str(e.data["w"]) for e in events])
+        assert [e.data["i"] for e in events if e.data["w"] == str(w)] == [
+            -1,
+            *range(PER_WRITER),
+        ]
+    measured = [e for e in events if e.data["i"] >= 0]
+    # Count from the moment the last writer asked for the lock for the first time (entering `acquire`, not
+    # getting it): a writer that started late is not barging, a writer kept waiting is.
+    all_asking = max(e.data["t"] for e in measured if e.data["i"] == 0)
+    start = next(j for j, e in enumerate(measured) if e.data["t"] >= all_asking)
+    ratio = handoff_ratio([str(e.data["w"]) for e in measured], start)
     waits = [round(r["wait_s"], 3) for r in reports]
-    print(f"hand-off ratio {ratio:.2f}, longest lock wait per writer {waits} s")
+    print(
+        f"hand-off ratio {ratio:.2f} (from append {start}), "
+        f"longest lock wait per writer {waits} s"
+    )
     assert ratio >= MIN_HANDOFF_RATIO, (
         f"the lock changed hands on only {ratio:.0%} of appends (barging)"
     )
