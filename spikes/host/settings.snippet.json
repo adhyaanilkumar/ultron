@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "python C:/git/ultron/spikes/host/hook.py" }
+        ]
+      }
+    ]
+  }
+}

@@ -11,3 +11,6 @@ dist/
 .mypy_cache/
 .ruff_cache/
 __pycache__/
+
+# T02 spike output
+spikes/host/hook.log
