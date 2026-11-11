@@ -11,6 +11,7 @@ Each criterion has a `verify_with` of `pytest`:
 - AC5 `test_ac5_*`: id format, local date, forced collisions.
 - AC6 `test_ac6_*` (D27, rerun R3): call_for_edit in the tables, both paths to escalated, never an attempt, blocking
   and settling before and after filing, replay of round trips after settling, outcome independent of the question.
+- D28 `test_d28_*` (rerun R3): Request changes at the intent gate loops back to intake_drafting (§3).
 No criterion has a `ci` half; CI only reruns these on Windows and Linux.
 """
 
@@ -174,12 +175,17 @@ def one(
 
 # --- AC1: every legal transition from spec §3, written by hand ------------------------------------------------
 
-# §3: submitted -> [intake_drafting -> awaiting_intent] -> spec_drafting -> awaiting_spec -> (changes ->
-# spec_drafting)* -> spec_approved -> decomposing -> [awaiting_tasks] -> in_progress -> complete|partial|escalated
+# §3: submitted -> [intake_drafting -> awaiting_intent -> (changes -> intake_drafting)*] -> spec_drafting ->
+# awaiting_spec -> (changes -> spec_drafting)* -> spec_approved -> decomposing -> [awaiting_tasks] -> in_progress ->
+# complete|partial|escalated
 LEGAL_REQ: dict[tuple[RequirementState, str], RequirementState] = {
     (R.SUBMITTED, "intake_started"): R.INTAKE_DRAFTING,
     (R.SUBMITTED, "spec_started"): R.SPEC_DRAFTING,
     (R.INTAKE_DRAFTING, "intent_drafted"): R.AWAITING_INTENT,
+    (
+        R.AWAITING_INTENT,
+        "intent.changes",
+    ): R.INTAKE_DRAFTING,  # D28: the comment goes back to the intake agent
     (R.AWAITING_INTENT, "intent.approve"): R.SPEC_DRAFTING,
     (R.SPEC_DRAFTING, "spec_drafted"): R.AWAITING_SPEC,
     (R.AWAITING_SPEC, "spec.changes"): R.SPEC_DRAFTING,
@@ -376,10 +382,10 @@ def test_ac1_resume_only_from_held(state: TaskState) -> None:
 
 
 def test_ac1_strict_s3_gate_decisions_are_illegal() -> None:
-    """§3 draws a `changes` loop only for spec and plan, and no `reject` edge before result. Spec §8 lists three
-    form buttons, so for intent/tasks `changes` and the `reject`s the spec is silent; the developer chose strict §3."""
+    """§3 draws a `changes` loop only for intent (D28), spec and plan, and no `reject` edge before result. Spec §8
+    lists three form buttons, so for tasks `changes` and the `reject`s §3 draws no edge; the developer chose strict
+    §3. `intent.changes` is legal since D28 (test_d28_*)."""
     for state, trigger in [
-        (R.AWAITING_INTENT, "intent.changes"),
         (R.AWAITING_INTENT, "intent.reject"),
         (R.AWAITING_SPEC, "spec.reject"),
         (R.AWAITING_TASKS, "tasks.changes"),
@@ -2819,6 +2825,274 @@ def test_ac6_after_settling_d27_events_on_unfiled_tasks_are_illegal(
             ALL_TASK_EVENTS[label](log, name)
             with pytest.raises(IllegalTransition):
                 fold(log.events)
+
+
+# --- D28: Request changes at the intent gate -------------------------------------------------------------------
+# Spec §3: "submitted -> [intake_drafting -> awaiting_intent -> (changes -> intake_drafting)*] -> spec_drafting ...".
+# D28: "changes send the draft back to the intake agent with the comment". Reject at the intent gate is still not
+# drawn in §3, so it stays illegal (test_ac1_strict_s3_gate_decisions_are_illegal).
+
+
+def _intent_loop(log: Log, rounds: int) -> list[RequirementState]:
+    """intake, then `rounds` x (draft -> changes), then a last draft and approve. Returns the state after each event."""
+    want = [R.INTAKE_DRAFTING]
+    log.add("intake_started")
+    for _ in range(rounds):
+        log.add("intent_drafted")
+        log.gate("intent", "changes")
+        want += [R.AWAITING_INTENT, R.INTAKE_DRAFTING]
+    log.add("intent_drafted")
+    log.gate("intent", "approve")
+    want += [R.AWAITING_INTENT, R.SPEC_DRAFTING]
+    return want
+
+
+def test_d28_pure_table_rows() -> None:
+    assert (
+        next_requirement_state(R.AWAITING_INTENT, "intent.changes") is R.INTAKE_DRAFTING
+    )
+    assert (
+        next_requirement_state(R.INTAKE_DRAFTING, "intent_drafted") is R.AWAITING_INTENT
+    )
+    assert (
+        next_requirement_state(R.AWAITING_INTENT, "intent.approve") is R.SPEC_DRAFTING
+    )
+    with pytest.raises(IllegalTransition):
+        next_requirement_state(R.AWAITING_INTENT, "intent.reject")
+
+
+def test_d28_full_loop_changes_redraft_changes_redraft_approve() -> None:
+    log = Log()
+    want = _intent_loop(log, rounds=2)
+    assert [e.type for e in log.events] == [
+        "intake_started",
+        "intent_drafted",
+        "gate_decision",
+        "intent_drafted",
+        "gate_decision",
+        "intent_drafted",
+        "gate_decision",
+    ]
+    assert [e.data["decision"] for e in log.events if e.type == "gate_decision"] == [
+        "changes",
+        "changes",
+        "approve",
+    ]
+    for k, req in enumerate(want, start=1):
+        snap = fold(log.events[:k])
+        assert snap.requirement is req, (k, log.events[k - 1].type)
+        assert snap.tasks == {}
+    # the loop leaves nothing behind: the rest of the flow runs exactly as after a first-time approve
+    log.add("spec_drafted")
+    assert fold(log.events).requirement is R.AWAITING_SPEC
+    log.gate("spec", "approve")
+    log.add("decomposition_started")
+    log.add("task_created", task="T1")
+    log.gate("tasks", "approve", auto=True)
+    log.approve_task("T1")
+    straight = Log()
+    straight.to_in_progress({"T1": {}})
+    straight.approve_task("T1")
+    assert fold(log.events) == fold(straight.events)
+    assert fold(log.events).requirement is R.COMPLETE
+
+
+@pytest.mark.parametrize("rounds", [1, 3, 10])
+def test_d28_any_number_of_rounds_ends_in_spec_drafting(rounds: int) -> None:
+    log = Log()
+    want = _intent_loop(log, rounds)
+    assert len(want) == len(log.events) == 3 + 2 * rounds
+    assert fold(log.events).requirement is R.SPEC_DRAFTING
+
+
+def test_d28_an_auto_or_commented_intent_changes_moves_the_same_way() -> None:
+    """The decision drives the state; actor, channel and comment are recorded but do not change it."""
+    human, auto, commented = Log(), Log(), Log()
+    for log in (human, auto, commented):
+        log.add("intake_started")
+        log.add("intent_drafted")
+    human.gate("intent", "changes")
+    auto.gate("intent", "changes", auto=True)
+    commented.add(
+        "gate_decision",
+        actor=USER,
+        gate="intent",
+        decision="changes",
+        channel="elicitation",
+        comment="Name the affected users.",
+    )
+    for log in (human, auto, commented):
+        assert fold(log.events).requirement is R.INTAKE_DRAFTING
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        # before any draft: submitted
+        lambda log: log.gate("intent", "changes"),
+        lambda log: log.gate("intent", "approve"),
+        lambda log: log.gate("intent", "reject"),
+        # intake started, nothing drafted yet
+        lambda log: (log.add("intake_started"), log.gate("intent", "changes")),
+        lambda log: (log.add("intake_started"), log.gate("intent", "reject")),
+        # sent back for changes, not redrafted yet: a second decision needs a new draft
+        lambda log: (
+            log.add("intake_started"),
+            log.add("intent_drafted"),
+            log.gate("intent", "changes"),
+            log.gate("intent", "changes"),
+        ),
+        lambda log: (
+            log.add("intake_started"),
+            log.add("intent_drafted"),
+            log.gate("intent", "changes"),
+            log.gate("intent", "approve"),
+        ),
+        # a template intent has no intake, so no intent gate either
+        lambda log: (log.add("spec_started"), log.gate("intent", "changes")),
+        # after approve the intent gate is closed
+        lambda log: (
+            log.add("intake_started"),
+            log.add("intent_drafted"),
+            log.gate("intent", "approve"),
+            log.gate("intent", "changes"),
+        ),
+        # a rejected intent is still not a §3 edge, even after a changes round
+        lambda log: (
+            log.add("intake_started"),
+            log.add("intent_drafted"),
+            log.gate("intent", "changes"),
+            log.add("intent_drafted"),
+            log.gate("intent", "reject"),
+        ),
+        # back in intake_drafting the spec cannot start or be drafted
+        lambda log: (
+            log.add("intake_started"),
+            log.add("intent_drafted"),
+            log.gate("intent", "changes"),
+            log.add("spec_drafted"),
+        ),
+        lambda log: (
+            log.add("intake_started"),
+            log.add("intent_drafted"),
+            log.gate("intent", "changes"),
+            log.add("spec_started"),
+        ),
+        lambda log: (
+            log.add("intake_started"),
+            log.add("intent_drafted"),
+            log.gate("intent", "changes"),
+            log.add("intake_started"),
+        ),
+    ],
+)
+def test_d28_intent_decision_without_a_fresh_draft_is_illegal(build: Any) -> None:
+    log = Log()
+    build(log)
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+def test_d28_intent_gate_after_settling_is_still_illegal() -> None:
+    for outcome in SETTLED_OUTCOMES:
+        log, _ = _settled(outcome)
+        log.gate("intent", "changes")
+        with pytest.raises(IllegalTransition):
+            fold(log.events)
+
+
+def test_d28_replay_is_deterministic_at_every_prefix() -> None:
+    log = Log()
+    _intent_loop(log, rounds=2)
+    log.add("spec_drafted")
+    log.gate("spec", "changes")
+    log.add("spec_drafted")
+    log.gate("spec", "approve")
+    log.add("decomposition_started")
+    log.add("task_created", task="A")
+    log.add("task_created", task="B", depends_on=["A"])
+    log.add("tasks_drafted")
+    log.gate("tasks", "approve")
+    log.approve_task("A")
+    log.approve_task("B")
+    full = log.events
+    snaps = [fold(full[:k]) for k in range(len(full) + 1)]
+    assert snaps[-1].requirement is R.COMPLETE
+    for k in range(len(full) + 1):
+        assert fold(full[:k]) == snaps[k]
+        assert fold(tuple(full[:k])) == snaps[k]
+        assert fold(e for e in full[:k]) == snaps[k]
+    # an ignored event on the end changes no prefix
+    longer = Log()
+    longer.events = list(full)
+    longer.add("agent_call", role="intake")
+    for k in range(len(full) + 1):
+        assert fold(longer.events[:k]) == snaps[k]
+    assert fold(longer.events) == snaps[-1]
+    # folding left the events alone
+    assert log.events == full
+
+
+def test_d28_replay_through_the_real_event_log(tmp_path: Path) -> None:
+    from ultron.store import events as ev
+    from ultron.store.eventlog import EventLog, events_path
+
+    user = ev.user_actor("Tester", "tester@example.com")
+
+    def new(type_: str, task: str | None = None, **data: Any) -> ev.NewEvent:
+        return ev.NewEvent(
+            actor="engine",
+            type=type_,
+            requirement=REQ,
+            task=task,
+            attempt=None,
+            data=data,
+        )
+
+    def intent(decision: str, comments: str = "") -> ev.NewEvent:
+        return ev.gate_decision(
+            REQ,
+            actor=user,
+            gate="intent",
+            decision=decision,
+            channel="terminal",
+            comments=comments,
+        )
+
+    stream = [
+        ev.intake(REQ, actor=user, source="text", request_path="request.md"),
+        new("intake_started"),
+        new("intent_drafted"),
+        intent("changes", "Say who is affected."),
+        new("intent_drafted"),
+        intent("changes", "Add the constraints."),
+        new("intent_drafted"),
+        intent("approve"),
+        new("spec_drafted"),
+    ]
+    want = [
+        R.SUBMITTED,
+        R.INTAKE_DRAFTING,
+        R.AWAITING_INTENT,
+        R.INTAKE_DRAFTING,
+        R.AWAITING_INTENT,
+        R.INTAKE_DRAFTING,
+        R.AWAITING_INTENT,
+        R.SPEC_DRAFTING,
+        R.AWAITING_SPEC,
+    ]
+    log = EventLog(events_path(tmp_path, REQ))
+    for item in stream:
+        log.append(item)
+    events = log.read(strict=True).events
+    assert [e.seq for e in events] == list(range(1, len(events) + 1))
+    reread = EventLog(events_path(tmp_path, REQ)).read(strict=True).events
+    assert reread == events
+    for k, req in enumerate(want, start=1):
+        snap = fold(events[:k])
+        assert snap.requirement is req, (k, events[k - 1].type)
+        assert fold(reread[:k]) == snap
+        assert fold([ev.from_json(ev.to_json_line(e)) for e in events[:k]]) == snap
 
 
 # --- housekeeping ----------------------------------------------------------------------------------------------
