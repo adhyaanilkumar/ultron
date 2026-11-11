@@ -2,13 +2,29 @@
 
 Focus: what could lose or corrupt the audit log. Real concurrent writer processes with a reader running at the
 same time, crashes at many byte offsets, append-only guarantees, CRLF, very large events, and older logs.
+
+Rerun after the tasks.md revision (each criterion has a `verify_with`):
+- AC1 `pytest`: `test_ac1_*` (gap-free seq, byte prefix unchanged after appends).
+- AC2 `pytest`: `test_ac2_*` (4 and 8 real processes, a reader running, non-ASCII paths and payloads, the engine's
+  `.ultron/locks/` lock path). Each writer reports the lock it used, so a CI run names the lock it proved
+  (msvcrt on Windows, fcntl on Linux). The `ci` half of AC2, and AC6, need a real GitHub Actions run.
+- AC3 `pytest`: `test_ac3_*`, including the developer's `tests/store/fixtures/events_v0_0_1.jsonl` read and
+  round-tripped byte for byte, and future schemas refused rather than misread.
+- AC4 `pytest`: `test_ac4_*`, truncation at many byte offsets, in-file and by a real process dying mid-write, and
+  a repair that must wait for a write in progress instead of cutting it.
+- AC5 `pytest`: `test_ac5_*`, one round-trip per event type, with non-ASCII in every free-text field.
+- No T05 test may be skipped or expected to fail: `test_no_t05_test_is_skipped_*`.
 """
 
+import ast
 import json
+import shlex
 import subprocess
 import sys
 import threading
 import time
+import tomllib
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -17,15 +33,20 @@ import pytest
 
 from ultron import __version__
 from ultron.store import events as ev
+from ultron.store._filelock import LOCK_BACKEND
 from ultron.store.eventlog import (
     CorruptLogError,
     EventLog,
     LockTimeout,
     NewerSchemaError,
     TruncatedLogError,
+    events_path,
 )
 
 DEADLINE_S = 45
+EXPECTED_BACKEND = "msvcrt" if sys.platform == "win32" else "fcntl"
+ROOT = Path(__file__).resolve().parents[2]
+FIXTURE = ROOT / "tests" / "store" / "fixtures" / "events_v0_0_1.jsonl"
 
 
 def _new(i: int = 0, **data: Any) -> ev.NewEvent:
@@ -138,6 +159,7 @@ def test_ac1_writes_lf_only_and_one_line_per_event(tmp_path: Path) -> None:
 WRITER = r"""
 import sys, time
 from pathlib import Path
+from ultron.store._filelock import LOCK_BACKEND
 from ultron.store.eventlog import EventLog
 from ultron.store.events import NewEvent
 
@@ -159,6 +181,7 @@ while i < n:
     else:
         log.append(NewEvent(actor="engine", type="probe", requirement="R1", data={"w": w, "i": i, "pad": pad}))
         i += 1
+print(LOCK_BACKEND)
 """
 
 READER = r"""
@@ -221,8 +244,10 @@ def _run_writers_with_reader(
         )
         go.touch()
         for proc in procs:
-            _, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
+            used, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
             assert proc.returncode == 0, err.decode(errors="replace")
+            # the lock this run proved (AC2 `ci`, AC6): msvcrt on Windows, fcntl on Linux
+            assert used.decode().strip() == EXPECTED_BACKEND
         time.sleep(0.2)  # let the reader see the final state at least once
         stop.touch()
         out, err = reader.communicate(timeout=max(1.0, deadline - time.monotonic()))
@@ -241,6 +266,7 @@ def _check_log(path: Path, workers: int, per_worker: int) -> None:
     assert len(lines) == workers * per_worker
     objs = [json.loads(line) for line in lines]  # every line valid JSON
     assert [o["seq"] for o in objs] == list(range(1, workers * per_worker + 1))
+    assert {o["ultron_version"] for o in objs} == {__version__}
     for w in range(workers):
         mine = [o["data"]["i"] for o in objs if o["data"]["w"] == str(w)]
         assert mine == list(range(per_worker)), f"worker {w} lost or reordered events"
@@ -1020,3 +1046,729 @@ def test_a2_ascii_escaped_text_from_another_writer_reads_and_rewrites_as_utf8() 
     event = ev.from_json(line)
     assert event.data == {"t": text}
     assert text.encode() in ev.to_json_line(event)
+
+
+# --- rerun: probes added after the tasks.md revision --------------------------------------------------------
+
+# 2-, 3- and 4-byte UTF-8, plus U+2028 and U+0085, which str.splitlines() treats as line breaks.
+TEXT_U = "Ä日本😀\u2028\x85é ✓"
+NAME_U = "Ädhya Ånil 日本 😀"
+SPEC_FIELDS = frozenset(
+    {
+        "schema",
+        "seq",
+        "time",
+        "actor",
+        "type",
+        "requirement",
+        "task",
+        "attempt",
+        "data",
+        "ultron_version",
+    }
+)
+
+
+def test_ac2_lock_backend_is_this_os_lock() -> None:
+    assert LOCK_BACKEND == EXPECTED_BACKEND
+
+
+# AC2 in the engine's own setup: the lock under `.ultron/locks/` (spec §10), a work folder whose path has spaces
+# and non-ASCII, and payloads of many lengths in multi-byte characters, so a torn or interleaved write would
+# split a character or mix two workers' text.
+WRITER_U = r"""
+import sys, time
+from pathlib import Path
+from ultron.store._filelock import LOCK_BACKEND
+from ultron.store.eventlog import EventLog
+from ultron.store.events import NewEvent, user_actor
+
+path, lock, ready, go, w, n = sys.argv[1], sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5], int(sys.argv[6])
+text = bytes.fromhex(sys.argv[7]).decode("utf-8")
+log = EventLog(path, lock)
+actor = user_actor("Wörker " + w + " 日本", "w" + w + "@example.com")
+ready.touch()
+end = time.monotonic() + 40
+while not go.exists():
+    if time.monotonic() > end:
+        sys.exit(3)
+    time.sleep(0.001)
+for i in range(n):
+    log.append(NewEvent(actor=actor, type="probe", requirement="R1", task="T" + w,
+                        data={"w": w, "i": i, "text": text * (1 + (7 * i + int(w)) % 40)}))
+print(LOCK_BACKEND)
+"""
+
+
+def test_ac2_engine_lock_path_non_ascii_paths_and_payloads(tmp_path: Path) -> None:
+    workers, per_worker = 4, 50
+    base = tmp_path / "wörk dír 日本 😀"
+    path = base / "sdlc" / "requirements" / "R1" / "events.jsonl"
+    lock = base / ".ultron" / "locks" / "R1.events.lock"
+    go = tmp_path / "go"
+    ready = [tmp_path / f"ready-{w}" for w in range(workers)]
+    deadline = time.monotonic() + DEADLINE_S
+    procs = [
+        _spawn(
+            WRITER_U,
+            str(path),
+            str(lock),
+            str(ready[w]),
+            str(go),
+            str(w),
+            str(per_worker),
+            TEXT_U.encode().hex(),
+        )
+        for w in range(workers)
+    ]
+    try:
+        _wait(lambda: all(p.exists() for p in ready), deadline, "writers to start")
+        go.touch()
+        for proc in procs:
+            used, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
+            assert proc.returncode == 0, err.decode(errors="replace")
+            assert used.decode().strip() == EXPECTED_BACKEND
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+
+    data = path.read_bytes()
+    text = data.decode("utf-8")  # strict: a torn multi-byte character fails here
+    assert text.endswith("\n") and "\r" not in text
+    lines = data.split(b"\n")[:-1]
+    assert len(lines) == workers * per_worker
+    objs = [json.loads(line) for line in lines]
+    assert [o["seq"] for o in objs] == list(range(1, workers * per_worker + 1))
+    for w in range(workers):
+        mine = [o for o in objs if o["data"]["w"] == str(w)]
+        assert [o["data"]["i"] for o in mine] == list(range(per_worker))
+        for o in mine:
+            assert o["data"]["text"] == TEXT_U * (1 + (7 * o["data"]["i"] + w) % 40)
+            assert o["actor"] == f"user:Wörker {w} 日本 <w{w}@example.com>"
+            assert o["task"] == f"T{w}"
+    assert TEXT_U.encode() in data  # written as UTF-8, not \u escapes (NFR2: readable)
+    assert lock.exists() and not path.with_name(path.name + ".lock").exists()
+    events = EventLog(path, lock).read(strict=True).events
+    assert [e.seq for e in events] == list(range(1, workers * per_worker + 1))
+
+
+# --- AC3: the developer's fixture (named by verify_with), future and malformed schemas -----------------------
+
+
+def test_ac3_fixture_v0_0_1_reads_and_round_trips(tmp_path: Path) -> None:
+    raw = FIXTURE.read_bytes()
+    # A Windows checkout with core.autocrlf=true (the default on GitHub's windows runner) gives CRLF here.
+    lines = [line.rstrip(b"\r") + b"\n" for line in raw.split(b"\n")[:-1]]
+    assert raw.endswith(b"\n") and len(lines) >= 2
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(raw)
+
+    events = EventLog(path).read(strict=True).events
+    assert [e.seq for e in events] == list(range(1, len(lines) + 1))
+    assert {e.ultron_version for e in events} == {"0.0.1"}
+    assert any(e.extra for e in events), "the fixture must carry an unknown field"
+    for line, event in zip(lines, events, strict=True):
+        obj = json.loads(line)
+        assert event.extra == {k: v for k, v in obj.items() if k not in SPEC_FIELDS}
+        assert event.data == obj["data"]  # unknown keys inside data are kept too
+        assert ev.to_json_line(event) == line  # round trip, byte for byte
+        assert ev.from_json(ev.to_json_line(event)) == event
+    assert path.read_bytes() == raw  # reading never rewrites
+
+    (new,) = EventLog(path).append(_new(9))
+    assert new.seq == len(lines) + 1 and new.ultron_version == __version__
+    assert path.read_bytes().startswith(raw)
+    again = EventLog(path).read(strict=True).events
+    assert again[:-1] == events and again[-1] == new
+
+
+@pytest.mark.parametrize("where", ["middle", "last"])
+@pytest.mark.parametrize("schema", [2, 99, 10**30])
+def test_ac3_future_schema_is_refused_not_misread(
+    tmp_path: Path, schema: int, where: str
+) -> None:
+    future = _line(2, schema=schema)
+    content = _line(1) + future + (_line(3) if where == "middle" else b"")
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(content)
+    log = EventLog(path)
+    for strict in (False, True):
+        with pytest.raises(NewerSchemaError) as info:
+            log.read(strict=strict)
+        assert info.value.schema == schema
+    with pytest.raises(NewerSchemaError):
+        ev.from_json(future)
+    if where == "last":
+        with pytest.raises(NewerSchemaError):
+            log.append(_new(9))
+        assert log.repair() == b""
+    assert path.read_bytes() == content
+
+
+def test_ac3_future_schema_with_a_new_shape_is_newer_not_corrupt(
+    tmp_path: Path,
+) -> None:
+    """A future line may rename or drop today's fields; it must still be reported as newer, not as corrupt."""
+    path = tmp_path / "events.jsonl"
+    content = _line(1) + b'{"schema":2,"seq":2,"who":"x","kind":"y","payload":[1]}\n'
+    path.write_bytes(content)
+    with pytest.raises(NewerSchemaError):
+        EventLog(path).read()
+    with pytest.raises(NewerSchemaError):
+        EventLog(path).append(_new(3))
+    assert path.read_bytes() == content
+
+
+@pytest.mark.parametrize(
+    "schema",
+    ["2", "1", 0, -1, True, 1.5],
+    ids=["str-2", "str-1", "0", "-1", "true", "1.5"],
+)
+def test_ac3_malformed_schema_is_never_read_as_an_event(
+    tmp_path: Path, schema: Any
+) -> None:
+    path = tmp_path / "events.jsonl"
+    content = _line(1) + _line(2, schema=schema) + _line(3)
+    path.write_bytes(content)
+    with pytest.raises((CorruptLogError, NewerSchemaError)):
+        EventLog(path).read()
+    assert path.read_bytes() == content
+
+
+# --- the reader validates order ------------------------------------------------------------------------------
+
+ORDERS: dict[str, tuple[list[int], int]] = {
+    "gap": ([1, 3], 2),
+    "duplicate": ([1, 1], 2),
+    "reversed": ([2, 1], 1),
+    "starts-at-0": ([0, 1], 1),
+    "starts-at-2": ([2, 3], 1),
+    "repeat-later": ([1, 2, 2], 3),
+    "jumps-back": ([1, 2, 3, 2], 4),
+}
+
+
+@pytest.mark.parametrize(("seqs", "bad_line"), ORDERS.values(), ids=ORDERS.keys())
+def test_reader_rejects_seq_out_of_order(
+    tmp_path: Path, seqs: list[int], bad_line: int
+) -> None:
+    path = tmp_path / "events.jsonl"
+    content = b"".join(_line(s) for s in seqs)
+    path.write_bytes(content)
+    for strict in (False, True):
+        with pytest.raises(CorruptLogError) as info:
+            EventLog(path).read(strict=strict)
+        assert info.value.line_no == bad_line
+    assert path.read_bytes() == content
+
+
+def test_events_path_is_the_spec_location(tmp_path: Path) -> None:
+    assert (
+        events_path(tmp_path, "R12")
+        == tmp_path / "sdlc" / "requirements" / "R12" / "events.jsonl"
+    )
+    for bad in ["../R1", "R1/..", "..", "", "a/b", "a\\b", "R1\n", "/abs", "R 1"]:
+        with pytest.raises(ValueError):
+            events_path(tmp_path, bad)
+
+
+# --- AC4: a real process dying mid-line at several offsets; repair racing a write in progress -----------------
+
+THIRD = _line(3, data={"t": TEXT_U * 3})
+_FIRST_MULTI = next(i for i, b in enumerate(THIRD) if b >= 0x80)
+CRASH_CUTS: dict[str, int] = {
+    "1-byte": 1,
+    "inside-a-key": 12,
+    "inside-a-multibyte-char": _FIRST_MULTI + 1,
+    "mid-line": len(THIRD) // 2,
+    "before-closing-brace": len(THIRD) - 2,
+    "all-but-newline": len(THIRD) - 1,
+}
+
+
+@pytest.mark.parametrize("cut", CRASH_CUTS.values(), ids=CRASH_CUTS.keys())
+def test_ac4_real_process_dies_mid_line(tmp_path: Path, cut: int) -> None:
+    log = _log(tmp_path)
+    log.append([_new(1), _new(2, text=TEXT_U)])
+    good = log.path.read_bytes()
+    partial = THIRD[:cut]
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            CRASHER,
+            str(log.path),
+            str(log.lock_path),
+            partial.hex(),
+        ],
+        check=False,
+        capture_output=True,
+        timeout=DEADLINE_S,
+    )
+    assert proc.returncode == 9, proc.stderr.decode(errors="replace")
+
+    after = EventLog(log.path, lock_timeout=10)  # the dead writer's lock must be free
+    result = after.read()
+    assert result.truncated_tail == partial
+    assert [e.seq for e in result.events] == [1, 2]
+    with pytest.raises(TruncatedLogError):
+        after.read(strict=True)
+    with pytest.raises(TruncatedLogError):
+        after.append(_new(3))
+    assert log.path.read_bytes() == good + partial
+    assert after.repair() == partial
+    assert log.path.read_bytes() == good
+    assert [e.seq for e in after.append(_new(3, text=TEXT_U))] == [3]
+    assert log.path.read_bytes().startswith(good)
+    assert _seqs(log) == [1, 2, 3]
+
+
+SLOW_WRITER = r"""
+import os, sys, time
+from pathlib import Path
+from ultron.store._filelock import FileLock
+
+path, lock, line, half, go, cut = sys.argv[1], sys.argv[2], bytes.fromhex(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5]), int(sys.argv[6])
+with FileLock(lock):
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
+    os.write(fd, line[:cut])
+    half.touch()
+    end = time.monotonic() + 40
+    while not go.exists():
+        if time.monotonic() > end:
+            sys.exit(3)
+        time.sleep(0.005)
+    os.write(fd, line[cut:])
+    os.close(fd)
+"""
+
+
+def test_ac4_repair_waits_for_a_write_in_progress(tmp_path: Path) -> None:
+    """A lock-free reader can see a half-written line. Repairing then must wait for the writer, not cut its line."""
+    log = _log(tmp_path)
+    log.append([_new(1), _new(2)])
+    good = log.path.read_bytes()
+    cut = _FIRST_MULTI + 1
+    half, go = tmp_path / "half", tmp_path / "go"
+    proc = _spawn(
+        SLOW_WRITER,
+        str(log.path),
+        str(log.lock_path),
+        THIRD.hex(),
+        str(half),
+        str(go),
+        str(cut),
+    )
+    results: dict[str, Any] = {}
+
+    def run(name: str, action: Callable[[], Any]) -> None:
+        try:
+            results[name] = action()
+        except BaseException as exc:  # noqa: BLE001 - checked below
+            results[name] = exc
+
+    threads = [
+        threading.Thread(
+            target=run, args=("repair", EventLog(log.path, lock_timeout=30).repair)
+        ),
+        threading.Thread(
+            target=run,
+            args=(
+                "append",
+                lambda: EventLog(log.path, lock_timeout=30).append(_new(4)),
+            ),
+        ),
+    ]
+    try:
+        _wait(half.exists, time.monotonic() + DEADLINE_S, "the writer to start a line")
+        seen = log.read()
+        assert seen.truncated_tail == THIRD[:cut]  # what a lock-free reader sees
+        for t in threads:
+            t.start()
+        time.sleep(0.3)
+        assert all(t.is_alive() for t in threads), "repair/append did not wait"
+        assert log.path.read_bytes() == good + THIRD[:cut]
+        go.touch()
+        for t in threads:
+            t.join(timeout=DEADLINE_S)
+        _, err = proc.communicate(timeout=DEADLINE_S)
+        assert proc.returncode == 0, err.decode(errors="replace")
+    finally:
+        go.touch()
+        if proc.poll() is None:
+            proc.kill()
+    assert results["repair"] == b"", results["repair"]
+    assert [e.seq for e in results["append"]] == [4], results["append"]
+    assert log.path.read_bytes().startswith(good + THIRD)
+    assert _seqs(log) == [1, 2, 3, 4]
+
+
+def test_ac4_append_and_repair_with_the_log_open_elsewhere(tmp_path: Path) -> None:
+    """A viewer holding the file open (common on Windows) must not block appends or a repair."""
+    log = _log(tmp_path)
+    log.append(_new(1))
+    with log.path.open("rb") as viewer:
+        log.append(_new(2))
+        with log.path.open("ab") as f:
+            f.write(b'{"seq":3,"time')
+        assert log.repair() == b'{"seq":3,"time'
+        assert [e.seq for e in log.append(_new(3))] == [3]
+        viewer.seek(0)
+        assert viewer.read() == log.path.read_bytes()
+    assert _seqs(log) == [1, 2, 3]
+
+
+@pytest.mark.parametrize("shift", [0, 1, 2, 3])
+def test_ac1_multibyte_char_across_the_tail_scan_boundary(
+    tmp_path: Path, shift: int
+) -> None:
+    """The writer reads the last line back in 64 KiB chunks; a 4-byte character split by a chunk must not matter."""
+    path = tmp_path / "events.jsonl"
+    last = _line(2, data={"p": "a" * shift + "😀" * 17_000})
+    assert len(last) > 64 * 1024
+    path.write_bytes(_line(1) + last)
+    assert [e.seq for e in EventLog(path).append(_new(3))] == [3]
+    assert _seqs(EventLog(path)) == [1, 2, 3]
+
+
+# --- AC5: one round trip per event type, with non-ASCII in every free-text field ------------------------------
+
+CONSTRUCTED_U: dict[str, tuple[str, Callable[[], ev.NewEvent]]] = {
+    "intake": (
+        ev.INTAKE,
+        lambda: ev.intake(
+            "R1",
+            actor=ev.user_actor(NAME_U, "ädhya@例え.jp"),
+            source="text",
+            request_path="sdlc/requirements/R1/réquest 日本.md",
+            title=TEXT_U,
+        ),
+    ),
+    "gate_decision-human": (
+        ev.GATE_DECISION,
+        lambda: ev.gate_decision(
+            "R1",
+            actor=ev.user_actor(NAME_U, "a@b.c"),
+            gate="architect",
+            decision="changes",
+            channel="terminal",
+            comments=TEXT_U + "\nzweite Zeile ✓\ttab",
+            task="T1",
+            attempt=2,
+            version="v2 ✓",
+        ),
+    ),
+    "gate_decision-auto": (
+        ev.GATE_DECISION,
+        lambda: ev.gate_decision(
+            "R1", actor="auto", gate="tester", decision="approve", channel="auto"
+        ),
+    ),
+    "attempt_started": (
+        ev.ATTEMPT_STARTED,
+        lambda: ev.attempt_started("R1", "T1", 1, rung="R2 ✓ 日本"),
+    ),
+    "attempt_finished": (
+        ev.ATTEMPT_FINISHED,
+        lambda: ev.attempt_finished(
+            "R1",
+            "T1",
+            3,
+            outcome="failed ✗",
+            report_path="sdlc/requirements/R1/tasks/T1/attempt-3 日本.md",
+            counted=True,
+        ),
+    ),
+    "escalation": (
+        ev.ESCALATION,
+        lambda: ev.escalation(
+            "R1", reason=TEXT_U, task="T1", attempt=3, ticket="AD-400"
+        ),
+    ),
+    "agent_call": (
+        ev.AGENT_CALL,
+        lambda: ev.agent_call(
+            "R1",
+            role="developer",
+            model="claude-opus-5-5",
+            effort="high",
+            duration_ms=0,
+            tokens={"input": 0, "output": 2**40, "cache_read": 7},
+            cost_usd=0,
+            transcript=".ultron/transcripts/日本 😀.jsonl",
+            prompt_sha256="0" * 64,
+            result_sha256="f" * 64,
+            task="T1",
+            attempt=1,
+            stop_reason=TEXT_U,
+        ),
+    ),
+    "config_snapshot": (
+        ev.CONFIG_SNAPSHOT,
+        lambda: ev.config_snapshot(
+            "R1",
+            max_attempts=5,
+            gates={
+                "architect": "human",
+                "plan": "auto",
+                "tester": "auto",
+                "merge": "human",
+                "deploy": "human",
+            },
+        ),
+    ),
+}
+
+
+def test_ac5_constructors_cover_every_spec_event_type() -> None:
+    assert {t for t, _ in CONSTRUCTED_U.values()} == {
+        ev.INTAKE,
+        ev.GATE_DECISION,
+        ev.ATTEMPT_STARTED,
+        ev.ATTEMPT_FINISHED,
+        ev.ESCALATION,
+        ev.AGENT_CALL,
+        ev.CONFIG_SNAPSHOT,
+    }
+
+
+@pytest.mark.parametrize("name", CONSTRUCTED_U)
+def test_ac5_each_event_type_round_trips(tmp_path: Path, name: str) -> None:
+    kind, make = CONSTRUCTED_U[name]
+    new = make()
+    assert new.type == kind
+    log = _log(tmp_path)
+    log.append(_new(0))  # in the middle of a log, not only as its first line
+    (written,) = log.append(new)
+    log.append(_new(2))
+
+    raw = log.path.read_bytes()
+    raw.decode("utf-8")  # strict
+    line = raw.split(b"\n")[1] + b"\n"
+    assert b"\\u" not in line  # non-ASCII is stored as UTF-8 text, readable (NFR2)
+    got = EventLog(log.path).read(strict=True).events[1]
+    assert got == written
+    assert (got.actor, got.type, got.requirement, got.task, got.attempt, got.data) == (
+        new.actor,
+        new.type,
+        new.requirement,
+        new.task,
+        new.attempt,
+        new.data,
+    )
+    assert got.seq == 2 and got.ultron_version == __version__ and got.extra == {}
+    assert ev.to_json_line(got) == line
+    assert json.loads(line)["data"] == new.data
+
+
+UNENCODABLE_U: dict[str, Callable[[], ev.NewEvent]] = {
+    "intake-title": lambda: ev.intake(
+        "R1", actor="engine", source="text", request_path="r.md", title="x\udcff"
+    ),
+    "intake-actor": lambda: ev.intake(
+        "R1",
+        actor=ev.user_actor("Ann\ud800", "a@b.c"),
+        source="text",
+        request_path="r.md",
+    ),
+    "intake-path": lambda: ev.intake(
+        "R1", actor="engine", source="file", request_path="C:\\r\udcff.md"
+    ),
+    "gate-name": lambda: ev.gate_decision(
+        "R1", actor="auto", gate="pl\udfffan", decision="approve", channel="auto"
+    ),
+    "gate-version": lambda: ev.gate_decision(
+        "R1",
+        actor="auto",
+        gate="plan",
+        decision="approve",
+        channel="auto",
+        version="\udcff",
+    ),
+    "attempt-rung": lambda: ev.attempt_started("R1", "T1", 1, rung="R\udcff"),
+    "attempt-report": lambda: ev.attempt_finished(
+        "R1", "T1", 1, outcome="failed", report_path="C:\\r\udcff.md"
+    ),
+    "escalation-reason": lambda: ev.escalation("R1", reason="r\udcff"),
+    "agent-transcript": lambda: ev.agent_call(
+        "R1",
+        role="tester",
+        model="m",
+        effort="low",
+        duration_ms=1,
+        tokens={"input": 1},
+        cost_usd=0.1,
+        transcript="C:\\t\udcff.jsonl",
+        prompt_sha256="a",
+        result_sha256="b",
+    ),
+    "agent-token-kind": lambda: ev.agent_call(
+        "R1",
+        role="tester",
+        model="m",
+        effort="low",
+        duration_ms=1,
+        tokens={"in\udcff": 1},
+        cost_usd=0.1,
+        transcript="t",
+        prompt_sha256="a",
+        result_sha256="b",
+    ),
+    "config-gate-name": lambda: ev.config_snapshot(
+        "R1", max_attempts=3, gates={"pl\udcffan": "auto"}
+    ),
+}
+
+
+@pytest.mark.parametrize("make", UNENCODABLE_U.values(), ids=UNENCODABLE_U.keys())
+def test_ac5_unencodable_text_in_any_constructor_is_an_event_error(
+    tmp_path: Path, make: Callable[[], ev.NewEvent]
+) -> None:
+    """Attempt 1 let a raw UnicodeEncodeError escape; every constructor's text must fail as an EventError."""
+    log = _log(tmp_path)
+    log.append(_new(1))
+    before = log.path.read_bytes()
+    with pytest.raises(ev.EventError):
+        log.append(make())
+    assert log.path.read_bytes() == before
+    assert [e.seq for e in log.append(_new(2))] == [2]
+
+
+def test_unencodable_unknown_field_is_an_event_error() -> None:
+    event = ev.Event(
+        1, 1, "t", "engine", "probe", "R1", None, None, {}, "0.0.1", {"note": "\udcff"}
+    )
+    with pytest.raises(ev.InvalidEventError):
+        ev.to_json_line(event)
+
+
+def test_escaped_lone_surrogate_from_another_writer_never_raises_a_raw_unicode_error(
+    tmp_path: Path,
+) -> None:
+    """`"\\udcff"` is legal JSON text but can't be UTF-8. Refusing it or reading it are both fine; a raw
+    UnicodeError (attempt 1's failure) is not, on read, on re-serialise or on the next append."""
+    path = tmp_path / "events.jsonl"
+    content = _line(1) + _line(2, data={"p": "X"}).replace(b'"X"', b'"\\udcff"')
+    path.write_bytes(content)
+    log = EventLog(path)
+    try:
+        events = log.read(strict=True).events
+    except CorruptLogError:
+        with pytest.raises(CorruptLogError):
+            log.append(_new(3))
+        assert path.read_bytes() == content
+        return
+    assert [e.seq for e in events] == [1, 2]
+    try:
+        ev.to_json_line(events[1])
+    except ev.InvalidEventError:
+        pass
+    assert [e.seq for e in log.append(_new(3))] == [3]
+    assert path.read_bytes().startswith(content)
+
+
+def test_line_separators_inside_text_never_split_a_line(tmp_path: Path) -> None:
+    weird = "a\x85b\u2028c\u2029d\x1ce\x1df\x1eg\x0bh\x0ci\rj\x00k\nl"
+    new = ev.NewEvent(
+        actor="user:Ädhya 日本\x85 <a@b.c>",
+        type="probe\u2028x",
+        requirement="R1",
+        task="T\u2029",
+        attempt=1,
+        data={weird: weird, "nested": [weird, {weird: [weird]}]},
+    )
+    log = _log(tmp_path)
+    log.append([new, _new(2)])
+    log.append(
+        _new(3, **{weird: weird})
+    )  # the last line holds them too: the tail scan must cope
+    assert [e.seq for e in log.append(_new(4))] == [4]
+    raw = log.path.read_bytes()
+    assert raw.count(b"\n") == 4 and b"\r" not in raw
+    events = log.read(strict=True).events
+    assert [e.seq for e in events] == [1, 2, 3, 4]
+    assert (events[0].actor, events[0].type, events[0].task, events[0].data) == (
+        new.actor,
+        new.type,
+        new.task,
+        new.data,
+    )
+    assert events[2].data[weird] == weird
+
+
+# --- no T05 test may be skipped or expected to fail (a skipped test is green in CI but proves nothing) -------
+
+_NO_RUN = frozenset({"skip", "skipif", "xfail", "importorskip", "SkipTest"})
+
+
+def _t05_test_files() -> list[Path]:
+    files = sorted((ROOT / "tests" / "store").glob("*.py"))
+    files.append(ROOT / "tests" / "acceptance" / "test_t05.py")
+    return files
+
+
+def test_no_t05_test_is_skipped_in_source() -> None:
+    found: list[str] = []
+    for path in _t05_test_files():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            name = (
+                node.attr
+                if isinstance(node, ast.Attribute)
+                else node.id
+                if isinstance(node, ast.Name)
+                else node.name
+                if isinstance(node, ast.alias)
+                else None
+            )
+            if name in _NO_RUN:
+                found.append(f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', '?')}")
+    # a conftest hook or pytest config could skip or deselect tests without touching the files
+    for conftest in [ROOT / "conftest.py", *(ROOT / "tests").rglob("conftest.py")]:
+        if conftest.exists():
+            tree = ast.parse(conftest.read_text(encoding="utf-8"))
+            hooks = [
+                n.name
+                for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name.startswith("pytest_")
+            ]
+            assert hooks == [], f"{conftest}: {hooks}"
+    with (ROOT / "pyproject.toml").open("rb") as f:
+        ini = tomllib.load(f).get("tool", {}).get("pytest", {}).get("ini_options", {})
+    addopts = ini.get("addopts", "")
+    tokens = addopts if isinstance(addopts, list) else shlex.split(addopts)
+    narrowing = ("--deselect", "--ignore", "-k", "-m", "--runxfail")
+    assert [t for t in tokens if t.startswith(narrowing)] == []
+    assert len(_t05_test_files()) >= 5
+    assert found == []
+
+
+def test_no_t05_store_test_is_skipped_when_run(tmp_path: Path) -> None:
+    """Run the developer's T05 tests on this OS and count: nothing skipped, nothing xfailed."""
+    report = tmp_path / "store.xml"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/store",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            f"--junitxml={report}",
+            f"--basetemp={tmp_path / 'basetemp'}",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, proc.stdout.decode(errors="replace")[-3000:]
+    root = ET.parse(report).getroot()
+    suite = root if root.tag == "testsuite" else root.find("testsuite")
+    assert suite is not None
+    counts = {
+        k: int(suite.get(k, "0")) for k in ("tests", "skipped", "failures", "errors")
+    }
+    assert counts["skipped"] == 0 and counts["failures"] == 0 and counts["errors"] == 0
+    assert counts["tests"] >= 30, counts
