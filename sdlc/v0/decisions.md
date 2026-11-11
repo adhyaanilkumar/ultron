@@ -119,14 +119,15 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R2 | First implementation | Failed (3 tests): tasks.md truncated before finding the task section; no fence-closing rule in prompts; NUL bytes in prompts |
 | 2 | R3 | Find the task section in the full text, truncate after; one rule sentence on sha256 fence ends in the common prompt; control characters replaced in prompt text (hash raw bytes); `truncated` flag; omitted instruction files recorded | Failed (3 tests): C1 controls (U+0080–U+009F) reach the prompt; surrogate-escaped folder name breaks the agent_call event; BOM before `### T1` |
-| 3 | R4 | Clean C1 too; write paths safely (escape surrogates) in the record and event; tolerate a leading BOM and CR-only line ends in tasks.md | In progress |
+| 3 | R4 | Clean C1 too; write paths safely (escape surrogates) in the record and event; tolerate a leading BOM and CR-only line ends in tasks.md; bidi controls neutralised in fence labels; unloggable events refused before the call | Developer green (3386 passed, all of test_t18.py); in testing |
 | 2026-11-11 | attempt | T10 attempt 1 (R3) | engine | fail | 4 failed, 3538 passed: a config_change in the log can show a locked gate as auto; auto approval at the escalation gate accepted for a task that isn't failing; climb to R4 |
 
 ### T10 · Gates
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R3 | First implementation; AC6 intent finished after D28 | Failed (4 tests): `config_change` could make merge/deploy/rollback read as auto; escalation-gate decision accepted for a task not failed/rejected |
-| 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected/call_for_edit/escalated tasks, judged by current state | Developer green (3600 passed, all of test_t10.py); in testing |
+| 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected/call_for_edit/escalated tasks, judged by current state | Failed (10 tests): a non-string mode value in the log crashes `settings()` (unhashable type) |
+| 3 | R5 | Type-check every mode value before comparing; non-strings read as human (snapshot) or are skipped (change) | In progress |
 | 2026-11-11 | attempt | T28 attempt 1 (R1) | engine | fail | 4 failed, 3143 passed: prune crashes against an open reader on Windows; append after a torn tail loses a row; a new attempt shows the old attempt's activity; </untrusted-data> in content closes the wrapper; climb to R2 |
 
 ### T28 · Activity stream and monitor
@@ -147,3 +148,4 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | attempt | T28 attempt 2 (R2) | engine | fail | 9 failed, 3202 passed: a second prune lowers activity.seq, so new rows reuse cursors a follower already passed; climb to R3 for attempt 3 (last) |
 | 2026-11-11 | result | T08 D29 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T08 (D29) into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | attempt | T10 attempt 2 (R4) | engine | fail | 10 failed, 3964 passed: a list/object where a gate mode should be crashes settings with TypeError (fails closed); climb to R5 for attempt 3 (last) |
