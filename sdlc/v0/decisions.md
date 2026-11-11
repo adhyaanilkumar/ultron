@@ -158,3 +158,7 @@ For every task that needs more than one attempt: what each attempt did different
 | Reopen (owner, not counted) | R4 | Root cause: antivirus scan on every read-open inside the lock, plus the releaser re-taking the polling lock. One kept read handle per EventLog opened outside the lock; a "turn" lock so the releaser can't barge; jittered polling | Tester: all criteria pass (30/30 unloaded max 0.80 s, loaded max 5.31 s; pre-fix code hit 45 s); 5 broken copies caught. But the developer's own stress test was flaky (2 of 14) — sent back to fix the test only |
 | 2026-11-11 | attempt | T16 attempt 2 (R4) | engine | fail | 22 failed, 3779 passed: 21 bypasses through options that allowed programs re-parse (ruff --config, pytest -o/-c/@file/--pastebin/-p, mypy @file/--install, git blame -S, wc --files0-from, Glob/Grep paths with leading spaces, symlink created mid-chain); after-call check skips silently if the worktree .git link is deleted; climb to R5 for attempt 3 (last) |
 | 2026-11-11 | spec | D31 known V0 limit: agent-written code | adhyaanilkumar | accept | sandbox/container per task goes to the next version's backlog |
+| 2026-11-11 | result | T18 attempt 3 | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T28 attempt 3 | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T18 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T28 into v0-design | adhyaanilkumar | approve | |
