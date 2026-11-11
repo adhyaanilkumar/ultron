@@ -5,12 +5,22 @@ stays unique and gap-free. A line, once written, is never rewritten. Readers don
 
 A crash mid-write can leave a last line with no `\\n`. `read()` reports it, `append()` refuses to write until
 `repair()` cuts it off, and `repair()` returns the bytes it cut so the caller can log them.
+
+`append()` finds the last `seq` through a read handle that the `EventLog` object keeps between appends. On Windows
+the first read-open of a file after another process wrote it is scanned by the antivirus (~10 ms, up to seconds on
+a busy machine); reopening the log for every append made every writer pay that scan, and inside the lock every other
+writer waited for it too. A kept handle still sees other writers' appends. It is checked against the file at the
+path under the lock and reopened if the log was created, deleted or replaced since. On Windows it is opened with
+delete sharing, so it never stops the log being deleted and recreated (as git does); it is closed with the object.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
+import threading
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -96,6 +106,62 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+if sys.platform == "win32":
+    import _winapi
+    import msvcrt
+
+    # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE; `os.open` can't ask for delete sharing.
+    _SHARE_ALL = 0x1 | 0x2 | 0x4
+
+    def _open_reader(path: Path) -> int | None:
+        """`path` opened read-only with delete sharing, or `None` if there is no file yet."""
+        try:
+            handle = _winapi.CreateFile(
+                str(path),
+                _winapi.GENERIC_READ,
+                _SHARE_ALL,
+                0,
+                _winapi.OPEN_EXISTING,
+                0,
+                0,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            return msvcrt.open_osfhandle(handle, os.O_RDONLY)
+        except BaseException:
+            _winapi.CloseHandle(handle)
+            raise
+
+else:
+
+    def _open_reader(path: Path) -> int | None:
+        """`path` opened read-only, or `None` if there is no file yet."""
+        try:
+            return os.open(path, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+
+
+def _close_reader(box: list[int | None]) -> None:
+    fd, box[0] = box[0], None
+    if fd is not None:
+        os.close(fd)
+
+
+def _read_at(fd: int, offset: int, size: int) -> bytes:
+    """Up to `size` bytes at `offset` (fewer only at the end of the file)."""
+    os.lseek(fd, offset, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while size > 0:
+        chunk = os.read(fd, size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b"".join(chunks)
+
+
 class EventLog:
     """One requirement's `events.jsonl`.
 
@@ -121,6 +187,10 @@ class EventLog:
         self.lock_timeout = lock_timeout
         self._clock = clock
         self._ultron_version = ultron_version
+        # The kept read handle (see the module docstring), in a box the finalizer can close without `self`.
+        self._reader: list[int | None] = [None]
+        self._reader_mutex = threading.Lock()
+        weakref.finalize(self, _close_reader, self._reader)
 
     # --- writing ----------------------------------------------------------------------------------------------
 
@@ -139,63 +209,85 @@ class EventLog:
         if not batch:
             return []
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with FileLock(self.lock_path, timeout=self.lock_timeout):
-            last_seq = self._last_seq()
-            stamp = format_time(self._clock())
-            events = [
-                Event(
-                    schema=SCHEMA_VERSION,
-                    seq=last_seq + i,
-                    time=stamp,
-                    actor=item.actor,
-                    type=item.type,
-                    requirement=item.requirement,
-                    task=item.task,
-                    attempt=item.attempt,
-                    data=item.data,
-                    ultron_version=self._ultron_version,
+        reader = self._reader
+        with (
+            self._reader_mutex
+        ):  # one append at a time through this object; they share the reader
+            if reader[0] is None:
+                # Before waiting for the lock, so a scan of this open overlaps the wait (module docstring).
+                reader[0] = _open_reader(self.path)
+            with FileLock(self.lock_path, timeout=self.lock_timeout):
+                # created, deleted or replaced since it was opened: reopen (rare; pays the scan in the lock)
+                if not self._is_current(reader[0]):
+                    _close_reader(reader)
+                    reader[0] = _open_reader(self.path)
+                last_seq = self._last_seq(reader[0])
+                stamp = format_time(self._clock())
+                events = [
+                    Event(
+                        schema=SCHEMA_VERSION,
+                        seq=last_seq + i,
+                        time=stamp,
+                        actor=item.actor,
+                        type=item.type,
+                        requirement=item.requirement,
+                        task=item.task,
+                        attempt=item.attempt,
+                        data=item.data,
+                        ultron_version=self._ultron_version,
+                    )
+                    for i, item in enumerate(batch, start=1)
+                ]
+                payload = b"".join(to_json_line(event) for event in events)
+                fd = os.open(
+                    self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_BINARY, 0o644
                 )
-                for i, item in enumerate(batch, start=1)
-            ]
-            payload = b"".join(to_json_line(event) for event in events)
-            fd = os.open(
-                self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_BINARY, 0o644
-            )
-            try:
-                view = memoryview(payload)
-                while view:
-                    written = os.write(fd, view)
-                    view = view[written:]
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+                try:
+                    view = memoryview(payload)
+                    while view:
+                        written = os.write(fd, view)
+                        view = view[written:]
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
         return events
 
-    def _last_seq(self) -> int:
-        """The `seq` of the last line, 0 for an empty or missing log. Reads back from the end only."""
-        if not self.path.exists():  # stable: only lock holders create or change the log
+    def _is_current(self, reader: int | None) -> bool:
+        """Whether `reader`, the kept handle, is still the file at `path` (`None`: there was no file)."""
+        try:
+            now = os.stat(self.path)
+        except FileNotFoundError:
+            return reader is None
+        if reader is None:
+            return False
+        then = os.fstat(reader)
+        return (then.st_dev, then.st_ino) == (now.st_dev, now.st_ino)
+
+    def _last_seq(self, reader: int | None) -> int:
+        """The `seq` of the last line, 0 for an empty or missing log. Reads back from the end only.
+
+        `reader` is the log opened for reading; the caller holds the lock, so its size is stable.
+        """
+        if reader is None:
             return 0
-        with self.path.open("rb") as f:
-            size = f.seek(0, os.SEEK_END)
-            if size == 0:
-                return 0
-            f.seek(size - 1)
-            if f.read(1) != b"\n":
-                raise TruncatedLogError(
-                    f"{self.path}: the last line has no newline (a write was cut off); repair it"
-                )
-            # The last line is the bytes before the final newline, back to the newline before them.
-            pos = size - 1
-            buf = b""
-            while True:
-                step = min(_TAIL_CHUNK, pos)
-                pos -= step
-                f.seek(pos)
-                buf = f.read(step) + buf
-                nl = buf.rfind(b"\n")
-                if nl != -1 or pos == 0:
-                    break
-            line = buf[nl + 1 :]
+        size = os.fstat(reader).st_size
+        if size == 0:
+            return 0
+        if _read_at(reader, size - 1, 1) != b"\n":
+            raise TruncatedLogError(
+                f"{self.path}: the last line has no newline (a write was cut off); repair it"
+            )
+        # The last line is the bytes before the final newline, back to the newline before them.
+        pos = size - 1
+        buf = b""
+        while True:
+            step = min(_TAIL_CHUNK, pos)
+            pos -= step
+            buf = _read_at(reader, pos, step) + buf
+            nl = buf.rfind(b"\n")
+            if nl != -1 or pos == 0:
+                break
+        line = buf[nl + 1 :]
         try:
             event = from_json(line)
         except NewerSchemaError:

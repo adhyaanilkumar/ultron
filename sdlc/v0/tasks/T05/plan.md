@@ -77,7 +77,8 @@ Options weighed:
   cleanly.
 - `tests/store/test_lock_stress.py` (new): (a) `append` never read-opens the log while holding the lock (deterministic,
   both OSes). (b) A stress run: 6 writer processes loop on `append` alongside CPU-burning processes. Every append's
-  wait must stay bounded, and no writer may get more than a few holds in a row. Under 60 s.
+  wait must stay bounded, and no writer may get more than a few holds in a row. Under 60 s. (Changed during the
+  build: (b) bounds the longest lock wait; see below.)
 - `sdlc/v0/tasks/T05/plan.md`: this section.
 
 ### Order of work
@@ -99,9 +100,68 @@ Options weighed:
    instead of being the normal case for one writer.
 4. **The stress test must not be flaky itself.** Its limits are set well above what the fixed code shows, and it
    checks hold order and the run length per writer rather than raw speed. The proof records the max duration of the
-   30 runs.
+   30 runs. (Changed during the build: it bounds the longest lock wait, calibrated below.)
 5. **The scan isn't gone, only moved out of the lock.** Each append still pays it once, in parallel with the other
    writers. Under heavy load a single append can still take a few hundred ms.
+
+### Changes during the reopen build
+- **The stress test bounds the longest lock wait, not the longest run.** With every CPU busy, the fixed lock still
+  showed runs of 9 to 17 appends by one writer. The writers that weren't running hadn't reached the lock (they were
+  opening the log or waiting for the scheduler), so the order followed when each scan finished, not the lock.
+  Measured over 6 × 60 appends with as many busy processes as CPUs, the longest single wait in `FileLock.acquire`
+  was 0.04 to 0.17 s with the fix (10 rounds) and 1.9 to 6.5 s before it (8 rounds). The test failed above 1.0 s
+  (changed again at the end; see Proof).
+  Through pytest it was red 4 of 4 on the old code (worst waits of 7.0 to 9.4 s) and green 6 of 6 on the new code
+  (5 to 9 s per run). The handoff ratio didn't separate the two reliably at half load (old code 0.44 to 0.65).
+- **Tried and dropped: a releaser that yields once before asking again.** Under load it gave the same numbers as
+  without it, at a cost to single writers.
+- **Also added:** a test that `append` reads a log created by another writer while it waited, and one where the
+  log is replaced while it waits (Linux: the next seq follows the new file; Windows: the replace is refused, risk 1).
+- **Fix 1 went further: the `EventLog` object keeps its read handle between appends** (risk 5 measured, then
+  removed). With a read-open before every append, the original test still took 7 to 33 s in about 1 run in 10 with
+  nothing else running, and up to 42.8 s of its 45 s under load (30 of 30 passed in each case). Instrumented, those
+  runs spent all their time in that read-open: a median of 200 to 400 ms per open, up to 2.7 s for one. Lock waits
+  stayed at most 0.18 s per writer. The scanner has slow phases of its own, so moving the scan out of the lock only
+  bought about 4 times the headroom. A handle that is kept is scanned once: reads through it after other writers'
+  appends cost 0.03 to 0.04 ms. So `append` now opens the reader once per object (before the lock), keeps it, and
+  checks it under the lock against the file at the path (`st_dev`/`st_ino`), reopening if the log was created,
+  deleted or replaced. A `threading.Lock` per object guards the handle, and `weakref.finalize` closes it with the
+  object. On Windows it is opened with `_winapi.CreateFile` and `FILE_SHARE_DELETE` (`os.open` can't ask for that)
+  and wrapped with `msvcrt.open_osfhandle`. Measured: with that sharing, the log can be deleted and recreated while
+  the handle is open (git's checkout does exactly that). An atomic `os.replace` onto it is still refused.
+- **Risk 1, revised.** Any process with a live `EventLog` that has appended keeps a read handle on that log. On
+  Windows, deleting the log and writing a new one (git) works, and the next append follows the new file (tested).
+  An atomic `os.replace` onto the log fails while such a handle is open, as it already does while any reader has
+  the file open. T07 should reset with git or delete-then-write, not `os.replace`. Note for T07.
+- **Risk 5, revised.** One scan per writer object instead of one per append. `_winapi` is a private stdlib module
+  (multiprocessing and asyncio use it), and typeshed covers it.
+- **Also added:** a test that a kept reader follows a log deleted and recreated, and one that a fresh object opens
+  exactly one reader, before the lock, for 7 appends.
+
+### Proof (reopen)
+`test_t05.py::test_ac2_engine_lock_path_non_ascii_paths_and_payloads`, 30 runs in a row, each in its own pytest
+process. "Load" means busy-loop processes, one per logical CPU (24).
+
+| Code | No load | Load 24 |
+|---|---|---|
+| Before (HEAD) | about 1 run in 11 failed (owner's report) | 15 runs: mean 15.1 s, max 35.8 s. At load 36: failed on run 1 (`TimeoutExpired` at the 45 s deadline) |
+| Read-open before the lock only | 30/30, mean 5.0 s, max 33.0 s | 30/30, mean 8.6 s, max 42.8 s |
+| Final (kept reader + turn lock) | **30/30, mean 0.54 s, max 0.76 s** | **30/30, mean 3.6 s, max 9.5 s**. At load 36: 10/10, mean 7.4 s, max 15.5 s |
+
+The stress test was changed again at the end. With the scan gone from each append, the order separates cleanly, so
+it now uses 6 × 100 appends and fails if any writer's longest lock wait is above 2.0 s **or** the lock changed hands
+on fewer than 60% of appends while all six were writing. Old code, load 24: red 4 of 4 (hand-offs on 13-31%,
+waits up to 10 s; 11-42% over 27 calibration rounds). New code: green 8 of 8 (hand-offs on 100%, waits at most
+0.59 s; 95-100% and at most 0.57 s over 18 calibration rounds). 1-2 s per run with the fix.
+
+Checks, Windows: `make build` → `Build succeeded`; `make lint` → `Lint succeeded` (plus `mypy --platform linux
+src`: no issues); `make test` → `3138 passed, 7 skipped` (the skips are outside T05) and `All tests passed`.
+
+Linux stand-in (the `uv` Python 3.13 image, 24 CPUs, a `git archive` of the staged tree streamed in, no bind
+mount): `LOCK_BACKEND fcntl`, `mypy src` no issues, `tests/store` plus `test_t05.py` 334 passed, the stress test
+6 of 6 green (hand-offs on 100%, waits at most 0.38 s). The new tests over HEAD's store modules were red 3 of 3 (6
+failed each time). There the old code's waits stayed under 2 s (0.39-1.0 s); the hand-off check (8-12%) caught it.
+That is evidence, not the `ci` proof: AC2 `ci` and AC6 are still ci-blocked (no remote).
 
 ## Rerun after the tasks.md revision (2026-11-11)
 The owner sent the work back to decomposition (lesson L3). `tasks.md` now gives each criterion a `verify_with`, gives
