@@ -43,7 +43,7 @@ Keep explanations within 280 characters. Go longer only when the content needs i
 Run build, lint and test before reporting anything done, and paste the result lines. Never skip, weaken or delete a failing test.
 
 ## Budget
-One cap, set by the owner on 2026-11-10: **₹12,000 a month for all personal-project expenses** (hosting, domains, tools, everything). There's no separate hosting cap anymore. ultron's agent calls run on the owner's Claude subscription (Pro plan), so they use plan limits, not money. Before adding anything that costs money, state its monthly cost in INR and stop for approval. Before a long run (for example an evaluation), estimate the usage and stop for approval.
+One cap, set by the owner on 2026-11-10: **₹12,000 a month for all personal-project expenses** (hosting, domains, tools, everything). There's no separate hosting cap anymore. The owner's Claude subscription is **Max at $100 a month (about ₹8,500)** from 2026-11-11, and it counts toward the cap, leaving about ₹3,500 for everything else. ultron's agent calls run on that plan, so they use plan limits, not extra money; usage credits beyond the plan cost money. Before adding anything that costs money, state its monthly cost in INR and stop for approval. Before a long run (for example an evaluation), estimate the usage and stop for approval.
 
 ## What ultron must enforce (from `intent.md`)
 The system enforces these, not the agents:
