@@ -1,4 +1,6 @@
 # T03 plan: verify first (TTY check, Agent SDK on the Pro login)
+
+Rerun (2026-11-11, after the tasks.md revision): existing code kept. New: AC5 now needs a pytest that the SDK pin agrees in `pyproject.toml`, `uv.lock` and `findings.md`; AC6 is new (no PENDING in the Local section, owner fills). Task has `mcp: none`, nothing to wire.
 Rung: **R1 kept** (rubric total 3). No reason to change: two small scripts, one test, no production code.
 Status: plan step, no code written. Depends on T01 (done).
 
@@ -6,6 +8,7 @@ Status: plan step, no code written. Depends on T01 (done).
 New:
 - `spikes/local/tty_check.py`: stdlib only. Prints one line, `terminal` or `not a terminal (stdin=<bool> stdout=<bool>)`, plus `platform`, and exits 0 if `sys.stdin.isatty() and sys.stdout.isatty()`, else 3. The function `is_interactive()` is the exact method T39 will reuse (the plan for T39 should import or copy it).
 - `spikes/local/sdk_check.py`: for each of `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` (model ids confirmed from the SDK/`claude --help` at code time, not guessed) run one tiny `query()` ("Reply with the word ok", `max_turns=1`, no tools, an `effort` option if the pinned SDK exposes one). Records per model: requested model and effort, the model the SDK's init/result message reports, effort applied if reported (else "not reported"), success or the error text, duration, and `ANTHROPIC_API_KEY` present/absent. Refuses to run (exit 2) if `ANTHROPIC_API_KEY` is set, so the call can only use the Pro login. Prints a markdown table the owner pastes into findings.
+- `tests/spikes/test_sdk_pin.py`: AC5 pin agreement (pyproject, uv.lock, findings.md).
 - `tests/spikes/test_tty_check.py` (+ `tests/spikes/__init__.py` only if needed by pytest config): AC1.
 - `sdlc/v0/findings.md`: new file, a "Local" section with the T03 questions and result placeholders: TTY per shell (4 rows), Claude Code Bash tool row, SDK per-model table, API key unset, default adapter, pinned SDK version. Placeholders are filled after the owner's runs.
 Edited:
@@ -41,7 +44,8 @@ Edited:
 |---|---|
 | AC1 | `tests/spikes/test_tty_check.py::test_piped_stdin_reports_not_a_terminal` runs the script via `subprocess` with `stdin=PIPE`, asserts "not a terminal" in output and returncode 3. Run by `make test`. |
 | AC2 | Owner steps 1; results in `findings.md` Local section, each "terminal". |
-| AC3 | Owner step 2; result in `findings.md`. |
+| AC3 | `command`: run `uv run python spikes/local/tty_check.py` via Claude Code's Bash tool (done 2026-11-10, row in findings.md); owner confirms. Owner step 2; result in `findings.md`. |
 | AC4 | Owner step 3; per-model table plus API-key-unset line in `findings.md`. |
-| AC5 | `findings.md` names the adapter and version; `grep claude-agent-sdk== pyproject.toml` shows the same exact pin. |
+| AC5 | `pytest` `tests/spikes/test_sdk_pin.py`: exact pin in `pyproject.toml`, same version in `uv.lock` and `findings.md`; `uv lock --check` exits 0. The default-adapter line is the owner's (AC6). |
+| AC6 | Owner fills the cells; `grep PENDING` in the Local section must find none. Currently PENDING, expected until the owner runs. |
 | Gates | `make build` ends `Build succeeded`, `make lint` `Lint succeeded`, `make test` `All tests passed`. |
