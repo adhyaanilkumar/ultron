@@ -153,7 +153,7 @@ decision on it (auto or human, same or another decision) with `GateError` and wr
 (`escalation`, `edit_requested`, `edit_done` events) is unaffected.
 - "Decided" means a decision recorded during the task's current stay at the gate that `decide` could have written:
   a human identity on `form` or `terminal`, or `auto` approving while the gate was `auto` for that task; with a string
-  decision and comment and no version. One recorded before the task reached the gate (attempt 2's rule), or by the
+  decision and comment (not blank for `changes`) and no version. One recorded before the task reached the gate (attempt 2's rule), or by the
   engine or an agent, or with another shape, never counts.
 - A stay lasts while the task is `failed`, `rejected`, `call_for_edit` or `escalated`. With T08 as on this branch a
   task never leaves them. With D29's T08 (`v0-design`) a stop in `call_for_edit` can return the task to an unfinished

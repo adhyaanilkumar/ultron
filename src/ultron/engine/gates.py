@@ -6,13 +6,18 @@ Every gate decision goes through `Gatekeeper.decide`, the single function that r
 - `merge`, `deploy` and `rollback` are locked: they refuse `auto` and any `who` that is not a human;
 - `auto` only approves, only when the requirement's settings make that gate `auto` for that item, only when the
   engine says the stage's own checks passed, and never on a failing task;
-- the `escalation` gate takes a decision only for a task that reached it (failed, rejected or escalating);
+- the `escalation` gate takes a decision only for a task that reached it (failed, rejected or escalating), and only
+  one while the task stays there (D30);
 - the decision is folded with the state machine (T08) before it is written, so an illegal one writes nothing.
 
 Settings are snapshotted when a requirement is submitted (`config_snapshot`, T05). A mid-run change is a
 `config_change` event that applies only to gates (or, for task gates, tasks) that have not reached the gate yet, so
 a gate already reached or passed keeps its mode and is never re-opened. Locked gates read `human` whatever any event
 says. `decisions.md` is rendered from the `gate_decision` events and is never edited by hand.
+
+Every value read from the log or given by a caller is type-checked before it is compared or converted, so a JSON
+list, object, number, bool or null where a string belongs never crashes a read: a snapshot mode other than the string
+`human` or `auto` reads `human`, and an event that `change_gate` or `decide` could not have written never counts.
 """
 
 from __future__ import annotations
@@ -21,9 +26,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
-from ultron.config.defaults import DEFAULT_HUMAN_GATES, LOCKED_GATES
+from ultron.config.defaults import (
+    DEFAULT_HUMAN_GATES,
+    LOCKED_GATES,
+    MAX_ATTEMPTS_DEFAULT,
+)
 from ultron.config.loader import LoadedConfig
 from ultron.engine.states import (
     IllegalTransition,
@@ -134,6 +143,14 @@ _FAILING = frozenset({T.FAILED, T.REJECTED, T.ESCALATED, T.CALL_FOR_EDIT, T.BLOC
 """A task in one of these states is never auto-approved (except at the escalation gate, which exists for them)."""
 
 
+def _one_of(value: object, choices: frozenset[str]) -> TypeGuard[str]:
+    """Whether `value` is one of the strings in `choices`.
+
+    The type is checked before the set lookup, so a JSON list or object (which can't be hashed) is simply not one.
+    """
+    return isinstance(value, str) and value in choices
+
+
 def _gate(name: object) -> GateInfo:
     if not isinstance(name, str) or name not in GATES:
         raise GateError(f"unknown gate {name!r}; gates are {', '.join(GATES)}")
@@ -186,51 +203,71 @@ class GateSettings:
         """The mode of `gate` for `task` (task gates) or for the requirement.
 
         For a task gate with `task=None`, the mode a task that has not reached the gate yet would get. A locked gate
-        is `human` whatever the modes and changes hold, and a mode other than `human` or `auto` reads `human`.
+        is `human` whatever the modes and changes hold. A mode other than the string `human` or `auto`, of any type,
+        reads `human`. A change whose `reached` is not a bool, or whose `reached_tasks` is not a tuple of strings,
+        never counts (settings built by hand can hold one; `settings_from` never builds one).
         """
         info = _gate(gate)
         if info.locked:
             return "human"
-        mode = self.modes.get(gate, "human")
+        mode: object = self.modes.get(gate, "human")
         for change in self.changes:
-            if change.gate != gate:
+            if change.gate != gate or not _well_formed(change):
                 continue
             if info.level == "requirement":
                 if not change.reached:
                     mode = change.to
             elif task is None or task not in change.reached_tasks:
                 mode = change.to
-        return mode if mode in GATE_MODES else "human"
+        if _one_of(mode, GATE_MODES):
+            return mode
+        return "human"
+
+
+def _well_formed(change: GateChange) -> bool:
+    """`reached` is a bool and `reached_tasks` a tuple of strings, as `settings_from` builds them."""
+    return (
+        isinstance(change.reached, bool)
+        and isinstance(change.reached_tasks, tuple)
+        and all(isinstance(t, str) for t in change.reached_tasks)
+    )
 
 
 def _change_from(event: Event) -> GateChange | None:
-    """A recorded change, or `None` for one `change_gate` could not have written (it never counts)."""
+    """A recorded change, or `None` for one `change_gate` could not have written (it never counts).
+
+    Each field settings read is type-checked before it is compared: the actor is a human identity, `gate` names a
+    changeable gate, `to` is the string `human` or `auto`, `reached` is a bool and `reached_tasks` a list of task ids
+    (non-empty strings). Any other value there, null included, means `change_gate` did not write the event. An
+    absent `reached` or `reached_tasks` reads as nothing reached; fields settings don't read are ignored.
+    """
     data = event.data
     gate, to = data.get("gate"), data.get("to")
-    if (
-        not _is_human(event.actor)
-        or not isinstance(gate, str)
-        or gate not in GATES
-        or GATES[gate].locked
-        or to not in GATE_MODES
+    reached = data.get("reached", False)
+    reached_tasks = data.get("reached_tasks", [])
+    if not (
+        _is_human(event.actor)
+        and isinstance(gate, str)
+        and gate in GATES
+        and not GATES[gate].locked
+        and _one_of(to, GATE_MODES)
+        and isinstance(reached, bool)
+        and isinstance(reached_tasks, list | tuple)
+        and all(isinstance(t, str) and t for t in reached_tasks)
     ):
         return None
-    reached_tasks = data.get("reached_tasks", [])
-    if not isinstance(reached_tasks, list):
-        reached_tasks = []
     return GateChange(
-        gate=gate,
-        to=str(to),
-        reached=bool(data.get("reached", False)),
-        reached_tasks=tuple(str(t) for t in reached_tasks),
+        gate=gate, to=to, reached=reached, reached_tasks=tuple(reached_tasks)
     )
 
 
 def settings_from(events: Iterable[Event]) -> GateSettings:
-    """Fold the snapshot and the changes. Raises `GateError` if there is no snapshot.
+    """Fold the snapshot and the changes. Raises `GateError` if there is no snapshot, and for nothing else.
 
     Locked gates are `human` whatever the events say: a snapshot value for them is overridden and a change to them
-    is skipped. So is a change not made by a human identity, or to an unknown gate or mode.
+    is skipped. A snapshot mode other than the string `human` or `auto` (a list, object, number, bool, null or any
+    other text) reads `human`, and a `max_attempts` that is not a positive integer reads as the default. A change
+    `change_gate` could not have written is skipped (see `_change_from`). Only the first snapshot counts.
     """
     snapshot: Event | None = None
     changes: list[GateChange] = []
@@ -245,26 +282,37 @@ def settings_from(events: Iterable[Event]) -> GateSettings:
         raise GateError(
             "no settings snapshot for this requirement; it is written at submit"
         )
-    modes: dict[str, str] = {name: "human" for name in GATES}
-    recorded = snapshot.data.get("gates", {})
+    modes: dict[str, str] = dict.fromkeys(GATES, "human")
+    recorded = snapshot.data.get("gates")
     if isinstance(recorded, Mapping):
         for name, value in recorded.items():
-            if name in GATES:
-                modes[name] = value if value in GATE_MODES else "human"
-    for name in LOCKED_GATES:
-        modes[name] = "human"
+            if (
+                isinstance(name, str)
+                and name in GATES
+                and not GATES[name].locked
+                and _one_of(value, GATE_MODES)
+            ):
+                modes[name] = value
     return GateSettings(
-        max_attempts=int(snapshot.data["max_attempts"]),
+        max_attempts=_max_attempts(snapshot.data.get("max_attempts")),
         modes=MappingProxyType(modes),
         changes=tuple(changes),
     )
+
+
+def _max_attempts(value: object) -> int:
+    """A snapshot's `max_attempts` when it is a positive integer (T05's builder rule), else the default (3)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return MAX_ATTEMPTS_DEFAULT
+    return value
 
 
 def gate_reached(events: Sequence[Event], gate: str, task: str | None = None) -> bool:
     """Whether the requirement (or `task`, for task gates) has reached `gate`: a draft or a decision for it exists.
 
     The escalation gate is the exception: it is reached only by a task in an escalating state, never by a decision
-    event, so a decision recorded on an unreached escalation gate does not count.
+    event, so a decision recorded on an unreached escalation gate does not count. A task that is not a string never
+    reaches it.
     """
     return _reached(events, None, _gate(gate), task)
 
@@ -274,7 +322,7 @@ def _reached(
 ) -> bool:
     """`gate_reached`, with the folded `snapshot` of `events` when the caller already has it."""
     if info.name == "escalation":
-        if task is None:
+        if not isinstance(task, str):
             return False
         if snapshot is None:
             snapshot = fold(events)
@@ -311,7 +359,8 @@ _BEFORE_TASKS = frozenset(
 def feedback(events: Iterable[Event], gate: str, item: str) -> str | None:
     """The comment of the latest `changes` decision on `item` at `gate`, until the item's next draft.
 
-    This is what the drafting agent gets on its next run (spec, plan, intent).
+    This is what the drafting agent gets on its next run (spec, plan, intent). A comment that is not a string (one
+    `decide` never writes) gives `""`: changes were asked, with no comment that can be read.
     """
     info = _gate(gate)
     task = item if info.level == "task" else None
@@ -324,7 +373,8 @@ def feedback(events: Iterable[Event], gate: str, item: str) -> str | None:
             and event.data.get("gate") == gate
             and event.data.get("decision") == "changes"
         ):
-            pending = str(event.data.get("comments", ""))
+            comments = event.data.get("comments", "")
+            pending = comments if isinstance(comments, str) else ""
         elif info.drafted_event is not None and event.type == info.drafted_event:
             pending = None
     return pending
@@ -428,7 +478,7 @@ class Gatekeeper:
     def change_gate(self, gate: str, mode: str, *, who: str) -> Event:
         """Change a gate's mode mid-run. It applies only to what has not reached the gate yet, and is recorded."""
         info = _gate(gate)
-        if mode not in GATE_MODES:
+        if not _one_of(mode, GATE_MODES):
             raise GateError(f"mode must be one of {sorted(GATE_MODES)}, got {mode!r}")
         if not _is_human(who):
             raise GateError(f"only a human git identity can change a gate, not {who!r}")
@@ -485,10 +535,11 @@ class Gatekeeper:
         """Record one gate decision, or raise and write nothing.
 
         `item` is the requirement id for requirement gates and the task id for task gates. `checks_passed` is the
-        engine's word that the stage's own checks passed; an `auto` decision needs it.
+        engine's word that the stage's own checks passed; an `auto` decision needs it to be exactly `True`. A gate,
+        item, decision, channel, comment or version that is not a string raises `GateError`.
         """
         info = _gate(gate)
-        if decision not in GATE_DECISIONS:
+        if not _one_of(decision, GATE_DECISIONS):
             raise GateError(
                 f"decision must be one of {sorted(GATE_DECISIONS)}, got {decision!r}"
             )
@@ -503,7 +554,7 @@ class Gatekeeper:
             raise GateError(
                 "an auto decision has who 'auto' and channel 'auto', and only then"
             )
-        if channel not in GATE_CHANNELS:
+        if not _one_of(channel, GATE_CHANNELS):
             raise GateError(
                 f"channel must be one of {sorted(GATE_CHANNELS)}, got {channel!r}"
             )
@@ -513,6 +564,8 @@ class Gatekeeper:
             raise GateError(
                 "a 'changes' decision needs a comment for the agent's next run"
             )
+        if version is not None and not isinstance(version, str):
+            raise GateError(f"version must be a string, got {version!r}")
         if version is not None and gate != "spec":
             raise GateError("only the spec gate records a version")
         if gate == "spec" and decision == "approve":
@@ -526,12 +579,8 @@ class Gatekeeper:
         events = self._events()
         snapshot = fold(events)
         task = self._task_for(info, item, snapshot)
-        if info.name == "escalation" and not _reached(events, snapshot, info, task):
-            # T08's fold ignores escalation decisions, so the gate's own rule is checked here, for auto and humans
-            state = snapshot.tasks[item].state.value
-            raise GateError(
-                f"{item} is {state}: only a failed, rejected or escalating task reaches the escalation gate"
-            )
+        if info.name == "escalation":
+            self._check_escalation(events, snapshot, item)
         if is_auto:
             self._check_auto(info, task, decision, checks_passed, events, snapshot)
 
@@ -587,11 +636,30 @@ class Gatekeeper:
                     f"gate '{info.name}' decides the requirement {self.requirement}, not {item!r}"
                 )
             return None
-        if item not in snapshot.tasks:
+        if not isinstance(item, str) or item not in snapshot.tasks:
             raise GateError(
                 f"gate '{info.name}' decides a task; {item!r} is not a task of {self.requirement}"
             )
         return item
+
+    def _check_escalation(
+        self, events: Sequence[Event], snapshot: Snapshot, task: str
+    ) -> None:
+        """The escalation gate takes a decision only for a task that reached it, and only one per stay (D30).
+
+        T08's fold ignores escalation decisions, so the gate's own rules are checked here, for auto and humans.
+        """
+        if not _reached(events, snapshot, GATES["escalation"], task):
+            state = snapshot.tasks[task].state.value
+            raise GateError(
+                f"{task} is {state}: only a failed, rejected or escalating task reaches the escalation gate"
+            )
+        taken = _escalation_decision(events, task)
+        if taken is not None:
+            raise GateError(
+                f"{task}'s escalation gate is already decided ({taken.data['decision']} by {taken.actor}, "
+                f"event {taken.seq}): a gate takes one decision (D30)"
+            )
 
     def _check_auto(
         self,
@@ -604,7 +672,7 @@ class Gatekeeper:
     ) -> None:
         if decision != "approve":
             raise GateError("auto only approves; changes and reject come from a human")
-        if not checks_passed:
+        if checks_passed is not True:
             raise GateError(
                 f"auto cannot pass '{info.name}': the stage's own checks have not passed"
             )
@@ -650,3 +718,59 @@ def _last_outcome(events: Sequence[Event], task: str) -> Any:
         if event.type == ATTEMPT_FINISHED and event.task == task:
             outcome = event.data.get("outcome")
     return outcome
+
+
+def _escalation_decision(events: Sequence[Event], task: str) -> Event | None:
+    """The escalation decision already taken in `task`'s current stay at the gate, or `None` (D30).
+
+    A stay starts when the task reaches the gate and lasts while it stays in `_ESCALATION_REACHED`. A task that leaves
+    (D29: a stop in `call_for_edit` back to an unfinished state) starts a new stay when it comes back, as a new draft
+    re-opens the other gates. Only a decision `decide` could have written counts (see `_could_decide`), so one
+    recorded before the task reached the gate, or by the engine or an agent, never closes the gate.
+    """
+    taken: Event | None = None
+    for i, event in enumerate(events):
+        if event.task != task:
+            continue
+        candidate = (
+            taken is None
+            and event.type == GATE_DECISION
+            and event.data.get("gate") == "escalation"
+        )
+        if taken is None and not candidate:
+            continue  # nothing to follow until a decision
+        status = fold(events[: i + 1]).tasks.get(task)
+        if status is None or status.state not in _ESCALATION_REACHED:
+            taken = None  # not at the gate: not yet, or it left (its next arrival is a new stay)
+        elif candidate and _could_decide(events[:i], event, task):
+            taken = event
+    return taken
+
+
+def _could_decide(prior: Sequence[Event], event: Event, task: str) -> bool:
+    """Whether `decide` could have written `event`, an escalation decision on `task` after the events in `prior`.
+
+    The decision, channel and comment are strings of the kinds `decide` writes and there is no version. It is by a
+    human identity on `form` or `terminal`, or by `auto` approving while the gate was `auto` for the task then.
+    (`checks_passed` is not recorded, so it can't be checked.)
+    """
+    data = event.data
+    decision, channel = data.get("decision"), data.get("channel")
+    comments = data.get("comments")
+    if not (
+        _one_of(decision, GATE_DECISIONS)
+        and _one_of(channel, GATE_CHANNELS)
+        and isinstance(comments, str)
+        and data.get("version") is None
+    ):
+        return False
+    if decision == "changes" and not comments.strip():
+        return False
+    if event.actor != "auto":
+        return _is_human(event.actor) and channel != "auto"
+    if channel != "auto" or decision != "approve":
+        return False
+    try:
+        return settings_from(prior).mode("escalation", task) == "auto"
+    except GateError:  # no snapshot before it
+        return False
