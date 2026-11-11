@@ -103,3 +103,52 @@ sprint on AK's board, then run AC6/AC7.
 3. **Lockfile.** `uv.lock` changes, so it may conflict on merge (L6); regenerate rather than hand-merge.
 4. **Token leaks through libraries.** httpx and httpcore DEBUG logs don't print header values today; the log-capture
    test catches a regression, including the Base64 Basic form.
+
+## Attempt 2 (R4)
+Attempt 1 failed at the testing agent: 2 of 85 acceptance tests in `tests/acceptance/test_t25.py` (commit 217c939).
+
+### Causes
+1. **Token reachable through `__context__` (AC4).** `_request` raised `JiraUnreachable(...) from None` inside the
+   `except` block. `from None` only sets `__suppress_context__`; the httpx error stays on `__context__`, and its
+   `_request` holds the `authorization: Basic ...` header. The code comment claimed the opposite. Same audit:
+   `_request` caught only `httpx.TransportError`, so `httpx.DecodingError` and `httpx.TooManyRedirects` (also
+   `RequestError`s carrying the request) escaped raw, with the header.
+2. **Double filing after create.** `attach()` read the file after the issue existed; a missing file raised a bare
+   `FileNotFoundError` with no `issue_key`, and `escalate` only tagged `JiraError`s. Any other non-`JiraError` after
+   create (a sprint without `id`, a non-JSON body) had the same gap.
+3. **Kanban boards (tester's note).** `GET /rest/agile/1.0/board/{id}/sprint` answers 400 ("The board does not support
+   sprints") on a board without sprints. Spec §12 says no active and no planned sprint means the backlog, so failing
+   there was wrong.
+
+### Fixes
+1. Every wrapped error is raised **after** its `except` block, from a string captured inside it, so `__cause__` and
+   `__context__` are both `None` and nothing ultron raises refers to an httpx object. `_request` catches
+   `httpx.HTTPError`: `TransportError` becomes `JiraUnreachable` (retry later), any other `HTTPError` becomes
+   `JiraError`. Both name only the method, path and error type.
+2. `attach()` turns an unreadable file (`OSError`) into a `JiraError` naming the file. `escalate()` tags every
+   `JiraError` after create with `issue_key`, and wraps any other `Exception` after create in a `JiraError` with
+   `issue_key` (type and message only, no chain).
+   - **Not done: checking attachments before create.** It would mean a missing file fails before the issue exists,
+     but `test_partial_failure_missing_attachment_file_carries_issue_key` requires that case to raise with
+     `issue_key == "TEST-1"`, so the issue must be created first. The acceptance test decides.
+3. A 400 from the sprint lookup gives `SprintChoice("backlog", reason=...)` with Jira's message, with no further
+   sprint call and no move. Other statuses (401, 403, 404, 5xx) and transport errors still fail with `issue_key`.
+   `reason` appears in `describe()` and, only when set, in `to_dict()` (AC2's acceptance test pins the dict for the
+   three plain cases). `sprints.json` gains a `no_sprints` response (docs: 400 for this endpoint; message text as
+   Atlassian reports it for kanban boards, not captured live).
+
+### Risks
+- A 400 for another reason (not kanban) also lands in the backlog. The issue is in the backlog anyway at that point,
+  and `reason` records Jira's message, so nothing is lost or hidden.
+- A transport error during the create POST itself (Jira created it, the reply was lost) still has no key, so a retry
+  can file twice. Needs a lookup by label or summary in T26; out of scope here.
+- Exception `__traceback__` frames still hold `self` (the client and its auth). That's true of any exception raised
+  in a method; `repr(client)` hides the token, and the test with `capture_locals` checks it.
+
+### Proof
+| Defect | Test (red first, then green) |
+|---|---|
+| 1 | `tests/jira/test_client.py::test_wrapped_errors_hold_no_auth[...]`: ConnectError, ReadTimeout, RemoteProtocolError, DecodingError, TooManyRedirects; walks `__cause__`, `__context__`, `args`, `vars()` and slots of every reachable object (not tracebacks) for the token, plain and Base64 |
+| 2 | `::test_post_create_failure_carries_key[...]`: missing file, directory as file, sprint without `id`, non-JSON sprint list; one create call, `JiraError.issue_key == "TEST-1"`, chain clean |
+| 3 | `::test_board_without_sprints_goes_to_backlog`, `::test_other_sprint_lookup_errors_still_fail[...]` |
+| all | `tests/acceptance/test_t25.py` 85 of 85; `make build`, `make lint`, `make test` |
