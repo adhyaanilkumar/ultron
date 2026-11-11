@@ -1,0 +1,53 @@
+{
+  "_capture": {
+    "date": "2026-11-11",
+    "source": "docs: Jira Software Cloud REST API, GET /rest/agile/1.0/board/{boardId}/sprint (response shape)",
+    "notes": "Rovo can't read a board's sprint list, so AK's board wasn't captured (owner step). Keys: the state query each response answers."
+  },
+  "active": {
+    "maxResults": 50,
+    "startAt": 0,
+    "isLast": true,
+    "values": [
+      {
+        "id": 7,
+        "self": "https://example.atlassian.net/rest/agile/1.0/sprint/7",
+        "state": "active",
+        "name": "TEST Sprint 4",
+        "startDate": "2026-11-09T09:00:00.000Z",
+        "endDate": "2026-11-23T09:00:00.000Z",
+        "originBoardId": 1,
+        "goal": ""
+      }
+    ]
+  },
+  "future": {
+    "maxResults": 50,
+    "startAt": 0,
+    "isLast": true,
+    "values": [
+      {
+        "id": 8,
+        "self": "https://example.atlassian.net/rest/agile/1.0/sprint/8",
+        "state": "future",
+        "name": "TEST Sprint 5",
+        "originBoardId": 1,
+        "goal": ""
+      },
+      {
+        "id": 9,
+        "self": "https://example.atlassian.net/rest/agile/1.0/sprint/9",
+        "state": "future",
+        "name": "TEST Sprint 6",
+        "originBoardId": 1,
+        "goal": ""
+      }
+    ]
+  },
+  "empty": {
+    "maxResults": 50,
+    "startAt": 0,
+    "isLast": true,
+    "values": []
+  }
+}

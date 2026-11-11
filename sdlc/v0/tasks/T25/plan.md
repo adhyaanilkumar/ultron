@@ -40,7 +40,7 @@ sprint on AK's board, then run AC6/AC7.
 - `src/ultron/jira/body.py`: the §12 ticket body (`TicketBody`, `AttemptRow`), the title
   `[ultron] R<n>/T<k> <title>`, and its Atlassian Document Format (ADF) rendering: headings, a criteria list, an
   attempt table, and the last test output as a code block.
-- `tests/jira/__init__.py`, `tests/jira/conftest.py` (registers the `live` marker), `tests/jira/fixtures/*.json`,
+- `tests/jira/__init__.py`, `tests/jira/fixtures/*.json`,
   `tests/jira/test_client.py`, `tests/jira/test_body.py`, `tests/jira/test_live.py` (owner only; skipped unless
   `-m live` is given).
 
@@ -82,6 +82,16 @@ sprint on AK's board, then run AC6/AC7.
 | AC6 | `live-call` · `owner` | `uv run pytest -m live tests/jira/test_live.py` with the `JIRA_*` variables set and `ULTRON_JIRA_TEST_PROJECT`, `ULTRON_JIRA_TEST_BOARD`, `ULTRON_JIRA_TEST_EPIC` naming the test project from `ultron.toml`. Creates one issue, checks it, deletes it in `finally` | owner |
 | AC7 | `screenshot-browser` · `owner` | same command with `ULTRON_JIRA_LIVE_PAUSE_SECONDS=180` and `-s`: it prints the issue URL and waits before deleting, so Claude in Chrome can screenshot the issue | owner |
 | AC8 | `live-call` · `pytest` | `test_client.py::test_fixtures_have_capture_header`. AC1's issue types are AK's real list (Rovo, read only); AC2's sprint lists are docs-shaped because Rovo can't read AK's board | partly met; sprint capture is an owner step |
+
+## Changes during build
+- No `tests/jira/conftest.py`: T05's acceptance test forbids `pytest_*` hooks in any conftest (so nothing can skip
+  tests silently). The `live` marker is registered in `pyproject.toml` (`markers`) instead, and `test_live.py` skips
+  itself unless the `-m` expression selects `live`.
+- The live test reads the target from `ULTRON_JIRA_TEST_CONFIG` (path to the test project's `ultron.toml`, loaded by
+  T04's `load_config`), not from separate env vars, so project, board and epic come only from config.
+- The sprint choice reads only the first page of each state (`maxResults=50`); only the first sprint is needed.
+- One `make test` run failed T05's `test_ac2_engine_lock_path_non_ascii_paths_and_payloads` (a multi-process lock
+  test) under load; it passed alone and on the next full run. Not touched by T25.
 
 ## Risks
 1. **Docs shapes vs. real responses.** Team-managed and company-managed projects differ (for example, the Sprint

@@ -1,0 +1,69 @@
+{
+  "_capture": {
+    "date": "2026-11-11",
+    "source": "live: test project AK, GET /rest/api/3/issue/createmeta/AK/issuetypes via Atlassian Rovo (read only)",
+    "notes": "Real response. Host rewritten to example.atlassian.net; no names, emails or account ids. AK has no Feature type."
+  },
+  "response": {
+    "startAt": 0,
+    "maxResults": 50,
+    "total": 5,
+    "issueTypes": [
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10014",
+        "id": "10014",
+        "description": "Subtasks track small pieces of work that are part of a larger task.",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10316?size=medium",
+        "name": "Subtask",
+        "untranslatedName": "Subtask",
+        "subtask": true,
+        "hierarchyLevel": -1,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      },
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10015",
+        "id": "10015",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10307?size=medium",
+        "name": "Epic",
+        "untranslatedName": "Epic",
+        "subtask": false,
+        "hierarchyLevel": 1,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      },
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10016",
+        "id": "10016",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10315?size=medium",
+        "name": "Story",
+        "untranslatedName": "Story",
+        "subtask": false,
+        "hierarchyLevel": 0,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      },
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10017",
+        "id": "10017",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10303?size=medium",
+        "name": "Bug",
+        "untranslatedName": "Bug",
+        "subtask": false,
+        "hierarchyLevel": 0,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      },
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10018",
+        "id": "10018",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10318?size=medium",
+        "name": "Task",
+        "untranslatedName": "Task",
+        "subtask": false,
+        "hierarchyLevel": 0,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      }
+    ]
+  }
+}

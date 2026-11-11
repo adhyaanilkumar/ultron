@@ -1,0 +1,23 @@
+{
+  "_capture": {
+    "date": "2026-11-11",
+    "source": "docs: Jira Cloud platform REST API v3, POST /rest/api/3/issue and POST /rest/api/3/issue/{key}/attachments (response shapes)",
+    "notes": "Writes are never made by agents; these are docs shapes with placeholder key TEST-1. The author object is left out (personal data)."
+  },
+  "create": {
+    "id": "10000",
+    "key": "TEST-1",
+    "self": "https://example.atlassian.net/rest/api/3/issue/10000"
+  },
+  "attachments": [
+    {
+      "self": "https://example.atlassian.net/rest/api/3/attachment/10001",
+      "id": "10001",
+      "filename": "attempt-1.log",
+      "created": "2026-11-11T10:00:00.000+0000",
+      "size": 23,
+      "mimeType": "text/plain",
+      "content": "https://example.atlassian.net/rest/api/3/attachment/content/10001"
+    }
+  ]
+}
