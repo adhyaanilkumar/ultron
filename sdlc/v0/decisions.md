@@ -40,3 +40,4 @@
 | 2026-11-11 | result | T13 attempt 1 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T11 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T13 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | attempt | T25 attempt 1 (R3) | engine | fail | 2 failed, 781 passed: auth header kept in JiraUnreachable.__context__ (token leak path); missing attachment file after create raises without issue_key (double filing on retry); climb to R4 |
