@@ -1,4 +1,4 @@
-"""The §12 ticket title and body, rendered as ADF."""
+"""The §12 ticket: its title, its short description (ADF) and report.md (D27)."""
 
 from __future__ import annotations
 
@@ -8,9 +8,14 @@ from typing import Any
 import pytest
 
 from ultron.jira.body import (
+    MAX_DESCRIPTION_CHARS,
     MAX_TEST_OUTPUT_CHARS,
+    REPORT_NAME,
     AttemptRow,
     TicketBody,
+    cut,
+    description_text,
+    render_report,
     tail,
     ticket_summary,
     to_adf,
@@ -76,47 +81,57 @@ def test_doc_is_adf() -> None:
     json.dumps(doc)  # serialisable
 
 
-def test_headings_criteria_table_and_code() -> None:
+# AC9: the description is at most 280 characters: the reason in one line and a pointer to report.md ------------
+
+
+def test_description_is_the_reason_and_a_pointer() -> None:
+    lines = description_text(_body()).split("\n")
+    assert lines == [
+        "Reason: all 3 attempts failed",
+        f"Criteria, attempts and the last test output: see the attached {REPORT_NAME}.",
+    ]
     doc = to_adf(_body())
-    headings = [_all_text(h) for h in _nodes(doc, "heading")]
-    assert headings == [
-        "Requirement",
-        "Task",
-        "Reason",
-        "Acceptance criteria",
-        "Attempts",
-        "Last test output",
-    ]
-    items = _nodes(doc, "listItem")
-    assert [_all_text(i) for i in items] == list(_body().acceptance_criteria)
-
-    (table,) = _nodes(doc, "table")
-    rows = table["content"]
-    assert [_all_text(c) for c in rows[0]["content"]] == [
-        "Attempt",
-        "Rung",
-        "Outcome",
-        "Summary",
-    ]
-    assert [_all_text(c) for c in rows[3]["content"]] == ["3", "R4", "fail", "timeout"]
-    assert rows[0]["content"][0]["type"] == "tableHeader"
-
-    (code,) = _nodes(doc, "codeBlock")
-    assert "AssertionError" in _all_text(code)
+    assert [p["type"] for p in doc["content"]] == ["paragraph", "paragraph"]
+    assert [_all_text(p) for p in doc["content"]] == lines
 
 
-def test_reason_and_task_present() -> None:
-    text = _all_text(to_adf(_body()))
-    assert "all 3 attempts failed" in text
-    assert "T2: Add the export button" in text
-    assert "R-20261111-a3f2" in text
+@pytest.mark.parametrize(
+    "notes", [[], ["filed as a Story because project TEST has no Feature type."]]
+)
+def test_description_stays_within_280_characters(notes: list[str]) -> None:
+    long = _body(
+        reason="rejected by the tester:\n" + "the export is wrong. " * 80,
+        acceptance_criteria=[f"AC{i}: " + "x" * 200 for i in range(30)],
+        last_test_output="E" * 100_000,
+        attempts=[AttemptRow(i, "R5", "fail", "y" * 300) for i in range(1, 10)],
+    )
+    text = description_text(long, notes)
+    assert len(text) <= MAX_DESCRIPTION_CHARS
+    doc = to_adf(long, notes)
+    texts = [_all_text(p) for p in doc["content"]]
+    assert len("\n".join(texts)) <= MAX_DESCRIPTION_CHARS
+    assert sum(len(t) for t in texts) <= MAX_DESCRIPTION_CHARS
+    reason = next(t for t in texts if t.startswith("Reason: "))
+    assert "\n" not in reason and reason.startswith(
+        "Reason: rejected by the tester: the export is wrong."
+    )
+    assert reason.endswith("…")
+    assert REPORT_NAME in texts[-1]
 
 
-def test_notes_come_first() -> None:
-    doc = to_adf(_body(), notes=["filed as a Story"])
+def test_description_leaves_the_details_to_the_report() -> None:
+    text = description_text(_body())
+    for detail in ("AC1", "the button exports CSV", "AssertionError", "R4", "timeout"):
+        assert detail not in text
+
+
+def test_note_comes_first() -> None:
+    note = "filed as a Story because project TEST has no Feature type."
+    doc = to_adf(_body(), notes=[note])
     first = doc["content"][0]
     assert first["type"] == "paragraph"
-    assert "filed as a Story" in _all_text(first)
+    assert _all_text(first) == f"Note: {note}"
+    assert len(description_text(_body(), [note])) <= MAX_DESCRIPTION_CHARS
 
 
 def test_no_empty_text_nodes() -> None:
@@ -124,12 +139,80 @@ def test_no_empty_text_nodes() -> None:
     assert all(n["text"] for n in _nodes(doc, "text"))
 
 
+def test_cut() -> None:
+    assert cut("short", 10) == "short"
+    assert cut("x" * 20, 10) == "x" * 9 + "…"
+    assert len(cut("x" * 20, 10)) == 10
+
+
+# AC9: report.md holds the requirement, task, criteria, each attempt's rung and result, and the last test output --
+
+
+def test_report_has_everything() -> None:
+    report = render_report(
+        _body(requirement_title="Export"),
+        notes=["filed as a Story because project TEST has no Feature type."],
+    )
+    assert report.startswith("# [ultron] R-20261111-a3f2/T2 Add the export button\n")
+    for needed in [
+        "Note: filed as a Story because project TEST has no Feature type.",
+        "## Reason",
+        "all 3 attempts failed",
+        "## Requirement",
+        "R-20261111-a3f2: Export",
+        "## Task",
+        "T2: Add the export button",
+        "## Acceptance criteria",
+        "- AC1: the button exports CSV",
+        "- AC2: an empty table exports headers",
+        "## Attempts",
+        "| Attempt | Rung | Outcome | Summary |",
+        "| 1 | R2 | fail | tests failed |",
+        "| 3 | R4 | fail | timeout |",
+        "## Last test output",
+        "FAILED tests/test_export.py::test_empty - AssertionError",
+    ]:
+        assert needed in report, needed
+
+
+def test_report_keeps_the_whole_reason() -> None:
+    reason = "rejected by the tester:\n" + "the export is wrong. " * 80
+    assert reason.strip() in render_report(_body(reason=reason))
+
+
+def test_report_cells_and_fences_are_safe() -> None:
+    report = render_report(
+        _body(
+            attempts=[AttemptRow(1, "R2", "fail", "a | b\nc")],
+            last_test_output="before\n```\ninside\n```\nafter",
+        )
+    )
+    assert "| 1 | R2 | fail | a \\| b c |" in report
+    assert "````text\nbefore\n```\ninside\n```\nafter\n````" in report
+
+
+def test_report_without_attempts_or_output() -> None:
+    report = render_report(
+        _body(attempts=[], last_test_output="", acceptance_criteria=[])
+    )
+    assert "No attempts ran." in report
+    assert report.count("None recorded.") == 2  # criteria and test output
+
+
+def test_report_keeps_the_tail_of_a_long_output() -> None:
+    report = render_report(
+        _body(last_test_output="a" * MAX_TEST_OUTPUT_CHARS + "THE-END")
+    )
+    assert "THE-END" in report
+    assert len(report) < MAX_TEST_OUTPUT_CHARS + 2_000
+
+
 def test_long_output_keeps_the_tail() -> None:
     out = "a" * MAX_TEST_OUTPUT_CHARS + "THE-END"
-    cut = tail(out)
-    assert cut.endswith("THE-END")
-    assert len(cut) < len(out) + 100
-    assert "cut" in cut
+    cut_output = tail(out)
+    assert cut_output.endswith("THE-END")
+    assert len(cut_output) < len(out) + 100
+    assert "cut" in cut_output
 
 
 @pytest.mark.parametrize("name", ["requirement", "task", "title", "reason"])

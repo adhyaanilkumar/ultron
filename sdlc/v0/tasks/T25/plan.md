@@ -222,3 +222,55 @@ Kept from attempt 2: AC1–AC3, AC5, AC8, kanban → backlog, `issue_key` on fai
 | 4 | `::test_client_setup_error_holds_no_token` (a bad `HTTPS_PROXY`) |
 | 3xx | `::test_redirect_is_an_error` |
 | all | `tests/acceptance/test_t25.py`, all passing; `make build`, `make lint`, `make test` |
+
+### D27 in the same attempt (owner, 2026-11-11)
+The engine sent D27 during this attempt: AC9 and AC10 are part of attempt 3 (not a new attempt), and the live checks
+(AC6–AC8) use test project AK only.
+- **AC9:** the description is at most 280 characters, counting line breaks. It holds the fallback note (if any), the
+  reason in one line (`Reason: …`, cut with "…" to fit) and a pointer to `report.md`, one ADF paragraph each.
+  `render_report()` builds `report.md` (Markdown): title, note, the whole reason, requirement, task, criteria, the
+  attempt table (rung and result), and the last test output (its tail, fenced). `escalate()` uploads it first, then the
+  files. It's built from the `TicketBody`, so the pointer is never wrong.
+- **AC10:** `check_attachments(paths)` (also `JiraClient.check_attachments`) lists every path that is missing, isn't a
+  file or can't be read, and makes no Jira call. `escalate()` runs it first. Any problem raises `MissingAttachments`, a
+  `JiraError` but not a `JiraUnreachable`, with `issue_key` None and `problems` naming each file, so nothing is
+  created. `attach()` raises it too. `comment(issue_key, text, attachment=None)` checks the file, uploads it, then posts
+  one paragraph of at most 280 characters (longer text is cut with "…"), and returns a `CommentResult`. New endpoint:
+  `POST /rest/api/3/issue/{key}/comment`.
+- **AC6–AC8:** `test_live.py` targets the AK project named by `ULTRON_JIRA_TEST_CONFIG`. It also checks that report.md
+  and the log are attached and that the description is at most 280 characters. The fixtures were already AK's
+  (issue types) or docs shapes; `issue_write.json` gains a docs-shaped comment reply.
+- My attempt-2 test `test_unreadable_attachment_carries_key` (create first, then report the key) is now
+  `test_unreadable_attachment_is_refused_before_any_call`, and `test_attachment_header` expects report.md first.
+
+Acceptance tests that D27 changes. The testing agent updates them; they aren't edited here:
+| Test | Attempt 1–2 expectation | After D27 |
+|---|---|---|
+| `test_ac5_attachment_header_and_multipart` | 2 uploads for 2 files | 3: report.md, then the 2 files |
+| `test_partial_failure_missing_attachment_file_carries_issue_key` | issue created, error has `issue_key` | `MissingAttachments` before any call, `issue_key` None |
+| `test_s12_description_content` (4 reasons) | criteria, attempts, test output in the description | in report.md; the description has the reason and a pointer |
+| `test_a2_kanban_board_goes_to_backlog_with_reason` | `len(result.attachments) == 1` | 2 (report.md and the log) |
+| `test_a2_recheck_attempt1_missing_attachment` | `issue_key == "TEST-1"`, one create | `MissingAttachments`, no create |
+| `test_a2_debug_logs_through_real_httpcore[happy]`, `[kanban]` | the wire script has one attach reply | two uploads (report.md and the log) |
+
+### Changes during build (attempt 3)
+- **Masking.** Jira's error text goes into exceptions and into the backlog `reason` (an event). It is masked (token
+  and Basic value become `***`) before it's cut at 500 characters, so no piece of either is left. Everything sent is
+  masked the same way: the `TicketBody` texts before the description and report are built, every uploaded file's
+  bytes, and comment text. A transcript that ran `env`, or a test that prints its config, would otherwise put the
+  token on the board.
+- **A mapping passed as `environ`** is dropped before `JiraCredentials.from_env` raises. `JiraClient.from_env` raises
+  a fresh `JiraConfigError` after its `except` block. So no `from_env` frame keeps it (the risk above is closed).
+- **`JIRA_BASE_URL` with a user or password** is refused: it would show in `repr(client)`, `result.url` and events.
+- **Red on the attempt-2 code** (my tests, before any fix): 40 failed, every one on the leak itself ("Basic-auth
+  header reachable" / "token reachable") or on a missing check ("DID NOT RAISE"). The cases added later were red
+  before their fix too: userinfo (2), mapping passed in (2), auth quoted in an error body (9), token in what is sent
+  (1). D27's tests failed on import (the new names didn't exist).
+- **Proof added:** `test_body.py` (description ≤ 280, note first, details only in the report, report content,
+  table cells and fences); `test_client.py::test_description_is_short_and_report_md_is_attached_first`,
+  `::test_check_attachments_*`, `::test_comment_*`, `::test_attach_refuses_a_missing_file`,
+  `::test_auth_quoted_in_an_error_body_is_masked`, `::test_the_token_is_masked_in_everything_sent`,
+  `::test_config_error_keeps_no_mapping_passed_in`, `comment` in `::test_public_method_errors_hold_no_auth`.
+- **Not done:** response shapes aren't validated. An unexpected shape before create (say an empty 200 for the issue
+  types) is still a plain `AttributeError` or `KeyError` with nothing secret in reach. After create it's a `JiraError`
+  with the key.

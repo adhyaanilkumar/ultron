@@ -1,12 +1,13 @@
-"""Owner step (T25 AC6/AC7): one live create and delete in the Jira test project. Never run by agents or CI.
+"""Owner step (T25 AC6/AC7): one live create and delete in the Jira test project AK. Never run by agents or CI.
 
 Run it only with `-m live`, with the `JIRA_*` variables set and `ULTRON_JIRA_TEST_CONFIG` pointing at an
-`ultron.toml` whose `[jira]` table names the test project, its board id and an epic in it:
+`ultron.toml` whose `[jira]` table names test project AK, its board id and an epic in it (never the real project):
 
     uv run pytest -m live tests/jira/test_live.py
 
 For the AC7 screenshot, add `-s` and set `ULTRON_JIRA_LIVE_PAUSE_SECONDS` (for example 180): the test prints the
-issue URL and waits that long before deleting the issue.
+issue URL and waits that long before deleting the issue. The description should show as plain text of at most 280
+characters, with report.md and the log attached (D27).
 """
 
 from __future__ import annotations
@@ -14,13 +15,28 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from ultron.config import load_config
-from ultron.jira import AttemptRow, JiraClient, JiraTarget, TicketBody
+from ultron.jira import (
+    MAX_DESCRIPTION_CHARS,
+    REPORT_NAME,
+    AttemptRow,
+    JiraClient,
+    JiraTarget,
+    TicketBody,
+)
 
 pytestmark = pytest.mark.live
+
+
+def _text(node: Any) -> str:
+    if isinstance(node, dict):
+        own = str(node.get("text", "")) if node.get("type") == "text" else ""
+        return own + "\n".join(_text(c) for c in node.get("content", []))
+    return ""
 
 
 def _live_selected(config: pytest.Config) -> bool:
@@ -76,8 +92,12 @@ def test_live_create_check_delete(
             assert fields["parent"]["key"] == target.epic
             assert fields["issuetype"]["name"] == result.issue_type == "Story"
             assert "ultron" in fields["labels"]
-            assert [a["filename"] for a in fields["attachment"]] == ["attempt-1.log"]
+            assert {a["filename"] for a in fields["attachment"]} == {
+                REPORT_NAME,
+                "attempt-1.log",
+            }
             assert fields["description"]["type"] == "doc"
+            assert len(_text(fields["description"])) <= MAX_DESCRIPTION_CHARS
 
             pause = float(os.environ.get("ULTRON_JIRA_LIVE_PAUSE_SECONDS", "0") or 0)
             if pause > 0:

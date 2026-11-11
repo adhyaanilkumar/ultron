@@ -1,18 +1,26 @@
-"""A small Jira Cloud REST client for escalation tickets (spec §12, D5).
+"""A small Jira Cloud REST client for escalation tickets (spec §12, D5, D27).
 
 Credentials come only from the environment (`JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`) and are never written to
-files, logs, exceptions or results. The client creates an issue under the configured epic, attaches files, and moves
-the issue into the board's active sprint (else the first future sprint, else it stays in the backlog). It never
-creates, starts, closes or edits a sprint: every call goes through `ENDPOINTS`, which has no such endpoint.
+files, logs, exceptions or results. The client checks the attachments before any call, creates an issue under the
+configured epic with a description of at most 280 characters, attaches `report.md` and the files, and moves the issue
+into the board's active sprint (else the first future sprint, else it stays in the backlog). It can also comment on an
+existing issue. It never creates, starts, closes or edits a sprint: every call goes through `ENDPOINTS`, which has no
+such endpoint.
+
+No exception the client raises can reach the token. httpx's client, auth, request and response objects all carry the
+Authorization header, so they, the token and `os.environ` live only in frames that always return (`_read_env`,
+`_http_client`, `_exchange`): no traceback ever holds those frames. Errors are raised after any `except` block, from
+frames that hold plain values only, so they have no cause or context either.
 """
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal, Self
@@ -21,7 +29,17 @@ from urllib.parse import quote
 import httpx
 
 from ultron.config.models import Jira
-from ultron.jira.body import TicketBody, ticket_summary, to_adf
+from ultron.jira.body import (
+    MAX_COMMENT_CHARS,
+    REPORT_NAME,
+    TicketBody,
+    cut,
+    one_line,
+    render_report,
+    short_doc,
+    ticket_summary,
+    to_adf,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +85,56 @@ class JiraUnreachable(JiraError):
     """Jira couldn't be reached (connection, TLS or timeout). The escalation should be retried later."""
 
 
+@dataclass(frozen=True)
+class AttachmentProblem:
+    """A file that can't be attached, and why: "missing", "not a file" or "unreadable: <error type>"."""
+
+    path: Path
+    reason: str
+
+
+class MissingAttachments(JiraError):
+    """Files missing or unreadable, found before anything was sent (spec §12, D27). Not worth a retry.
+
+    `problems` names every one. The engine sends the task to `call_for_edit` to have them added, then files again.
+    """
+
+    def __init__(
+        self, problems: Sequence[AttachmentProblem], *, effect: str = "nothing was sent"
+    ) -> None:
+        self.problems = tuple(problems)
+        listed = "; ".join(f"{p.path} ({p.reason})" for p in self.problems)
+        count = len(self.problems)
+        super().__init__(
+            f"{count} attachment{'s' if count != 1 else ''} missing or unreadable, so {effect}: {listed}"
+        )
+
+
+def _why_unreadable(path: Path) -> str:
+    """Why `path` can't be attached, or "" when it can be read."""
+    try:
+        if not path.exists():
+            return "missing"
+        if not path.is_file():
+            return "not a file"
+        with path.open("rb") as handle:
+            handle.read(1)
+    except OSError as exc:
+        return f"unreadable: {type(exc).__name__}"
+    return ""
+
+
+def check_attachments(paths: Iterable[Path | str]) -> list[AttachmentProblem]:
+    """Every file in `paths` that is missing or can't be read, with why. It makes no Jira call (spec §12, D27)."""
+    problems: list[AttachmentProblem] = []
+    for raw in paths:
+        path = Path(raw)
+        reason = _why_unreadable(path)
+        if reason:
+            problems.append(AttachmentProblem(path, reason))
+    return problems
+
+
 class _Secret:
     """Holds the token. Its repr and str never show it."""
 
@@ -84,6 +152,35 @@ class _Secret:
     __str__ = __repr__
 
 
+def _read_env(source: Mapping[str, str]) -> tuple[str, str, _Secret] | str:
+    """The base URL, email and token from `source`, or a message saying what's missing or wrong. It never raises.
+
+    Its frame holds the token and the environment, so the caller raises the error, from a frame that holds neither.
+    """
+    values: dict[str, str] = {}
+    for name in ENV_VARS:
+        value = (source.get(name) or "").strip()
+        if not value:
+            return (
+                f"{name} is not set. Jira escalation needs {', '.join(ENV_VARS)} in the environment; "
+                "ultron never reads Jira credentials from files."
+            )
+        values[name] = value
+    base_url = values["JIRA_BASE_URL"].rstrip("/")
+    example = "for example https://your-site.atlassian.net"
+    if not base_url.startswith("https://"):
+        return f"JIRA_BASE_URL must start with https:// ({example})"
+    try:
+        url = httpx.URL(base_url)
+    except Exception as exc:  # noqa: BLE001 - only the type: the message can quote parts of the URL
+        return f"JIRA_BASE_URL is not a valid URL ({type(exc).__name__}; {example})"
+    if not url.host:
+        return f"JIRA_BASE_URL has no host ({example})"
+    if url.userinfo:
+        return f"JIRA_BASE_URL must not hold a user or password; the token goes in JIRA_API_TOKEN ({example})"
+    return base_url, values["JIRA_EMAIL"], _Secret(values["JIRA_API_TOKEN"])
+
+
 @dataclass(frozen=True)
 class JiraCredentials:
     base_url: str
@@ -92,23 +189,16 @@ class JiraCredentials:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> JiraCredentials:
-        """Read the three `JIRA_*` variables; a missing or empty one raises `JiraConfigError` naming it."""
-        source = os.environ if environ is None else environ
-        values: dict[str, str] = {}
-        for name in ENV_VARS:
-            value = (source.get(name) or "").strip()
-            if not value:
-                raise JiraConfigError(
-                    f"{name} is not set. Jira escalation needs {', '.join(ENV_VARS)} in the environment; "
-                    "ultron never reads Jira credentials from files."
-                )
-            values[name] = value
-        base_url = values["JIRA_BASE_URL"].rstrip("/")
-        if not base_url.startswith("https://"):
-            raise JiraConfigError(
-                "JIRA_BASE_URL must start with https:// (for example https://your-site.atlassian.net)"
-            )
-        return cls(base_url, values["JIRA_EMAIL"], _Secret(values["JIRA_API_TOKEN"]))
+        """Read the three `JIRA_*` variables; a missing or empty one raises `JiraConfigError` naming it.
+
+        `_read_env` does the reading, so this frame, which raises, holds neither the token nor `os.environ`.
+        """
+        found = _read_env(os.environ if environ is None else environ)
+        # A mapping passed in holds the token: the error below must not keep it in this frame.
+        del environ
+        if isinstance(found, str):
+            raise JiraConfigError(found)
+        return cls(*found)
 
 
 @dataclass(frozen=True)
@@ -149,6 +239,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     "issue_get": Endpoint("GET", "/rest/api/3/issue/{key}"),
     "issue_delete": Endpoint("DELETE", "/rest/api/3/issue/{key}"),
     "issue_attach": Endpoint("POST", "/rest/api/3/issue/{key}/attachments"),
+    "issue_comment": Endpoint("POST", "/rest/api/3/issue/{key}/comment"),
     "board_sprints": Endpoint("GET", "/rest/agile/1.0/board/{board_id}/sprint"),
     "sprint_move_issues": Endpoint("POST", "/rest/agile/1.0/sprint/{sprint_id}/issue"),
 }
@@ -221,10 +312,28 @@ class EscalationResult:
         }
 
 
+@dataclass(frozen=True)
+class CommentResult:
+    """A comment `JiraClient.comment` added, for the event log. Holds no credentials."""
+
+    issue_key: str
+    comment_id: str
+    text: str
+    attachment: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "issue_key": self.issue_key,
+            "comment_id": self.comment_id,
+            "text": self.text,
+            "attachment": self.attachment,
+        }
+
+
 def fallback_note(project: str, requested: str) -> str:
+    """Said in the ticket when Feature falls back to Story; short, since the description is at most 280 characters."""
     return (
-        f"ultron asked for issue type {requested}, but project {project} has no {requested} type, "
-        f"so this ticket was filed as a {FALLBACK_TYPE}."
+        f"filed as a {FALLBACK_TYPE} because project {project} has no {requested} type."
     )
 
 
@@ -237,23 +346,82 @@ def _labels(extra: Sequence[str]) -> list[str]:
     return out
 
 
-def _error_text(response: httpx.Response) -> str:
+def _error_text(response: httpx.Response, hide: Callable[[str], str]) -> str:
+    """Jira's error messages, else the start of the body. Masked before it's cut, so no piece of a secret is left."""
+    text = response.text
     try:
         data = response.json()
     except ValueError:
-        return response.text[:MAX_ERROR_TEXT]
+        data = None
     if isinstance(data, dict):
         parts = [str(m) for m in data.get("errorMessages") or []]
         errors = data.get("errors") or {}
         if isinstance(errors, dict):
             parts += [f"{k}: {v}" for k, v in errors.items()]
         if parts:
-            return "; ".join(parts)[:MAX_ERROR_TEXT]
-    return response.text[:MAX_ERROR_TEXT]
+            text = "; ".join(parts)
+    return hide(text)[:MAX_ERROR_TEXT]
+
+
+@dataclass(frozen=True)
+class _Reply:
+    """What `_exchange` keeps of one HTTP exchange: plain values, never an httpx object."""
+
+    status: int | None = None
+    data: Any = None
+    failure: str = ""
+    unreachable: bool = False
+
+
+def _reply(response: httpx.Response, hide: Callable[[str], str]) -> _Reply:
+    """The status and either Jira's error text or the parsed JSON body; the response itself goes no further."""
+    status = response.status_code
+    if not response.is_success:  # redirects aren't followed, so a 3xx fails too
+        return _Reply(
+            status, failure=f"failed with {status}: {_error_text(response, hide)}"
+        )
+    if not response.content:
+        return _Reply(status)  # 204 from move and delete
+    try:
+        data = response.json()
+    except ValueError:  # JSONDecodeError or UnicodeDecodeError
+        return _Reply(status, failure=f"answered {status} with a body that isn't JSON")
+    return _Reply(status, data)
+
+
+def _masks(credentials: JiraCredentials) -> tuple[_Secret, _Secret]:
+    """The token, and the Basic-auth value httpx sends for it: what `JiraClient._hide` masks in text from Jira."""
+    pair = f"{credentials.email}:{credentials.token.reveal()}".encode(errors="replace")
+    return credentials.token, _Secret(base64.b64encode(pair).decode())
+
+
+def _http_client(
+    credentials: JiraCredentials,
+    transport: httpx.BaseTransport | None,
+    timeout: float,
+) -> httpx.Client | str:
+    """The httpx client, or the type name of the error that stopped it (a bad proxy variable, say). It never raises.
+
+    That error's traceback holds the credentials (here) and the Basic-auth header (in httpx's frames), so only its type
+    name leaves this frame.
+    """
+    try:
+        return httpx.Client(
+            base_url=credentials.base_url,
+            auth=httpx.BasicAuth(credentials.email, credentials.token.reveal()),
+            headers={"Accept": "application/json"},
+            timeout=timeout,
+            transport=transport,
+        )
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        return type(exc).__name__
 
 
 class JiraClient:
     """Jira Cloud over HTTPS with Basic auth (email and API token)."""
+
+    # Also usable as `client.check_attachments(paths)`; it makes no Jira call either way.
+    check_attachments = staticmethod(check_attachments)
 
     def __init__(
         self,
@@ -263,19 +431,29 @@ class JiraClient:
         timeout: float = 30.0,
     ) -> None:
         self._base_url = credentials.base_url
-        self._http = httpx.Client(
-            base_url=credentials.base_url,
-            auth=httpx.BasicAuth(credentials.email, credentials.token.reveal()),
-            headers={"Accept": "application/json"},
-            timeout=timeout,
-            transport=transport,
-        )
+        self._secrets = _masks(credentials)
+        http = _http_client(credentials, transport, timeout)
+        # The credentials hold the token: the error below must not keep them in this frame.
+        del credentials
+        if isinstance(http, str):
+            raise JiraConfigError(
+                f"the Jira client can't be set up ({http}); check JIRA_BASE_URL and any proxy variables"
+            )
+        self._http = http
 
     @classmethod
     def from_env(
         cls, environ: Mapping[str, str] | None = None, **kwargs: Any
     ) -> JiraClient:
-        return cls(JiraCredentials.from_env(environ), **kwargs)
+        """A client for the `JIRA_*` variables. A config error is raised anew here, after `environ` is dropped."""
+        failure = ""
+        try:
+            return cls(JiraCredentials.from_env(environ), **kwargs)
+        except JiraConfigError as exc:
+            failure = str(exc)
+        # As in JiraCredentials.from_env: a mapping passed in holds the token.
+        del environ
+        raise JiraConfigError(failure)
 
     def __repr__(self) -> str:
         return f"JiraClient(base_url={self._base_url!r})"
@@ -301,7 +479,12 @@ class JiraClient:
         name: str,
         path_args: Mapping[str, str | int] | None = None,
         **kwargs: Any,
-    ) -> httpx.Response:
+    ) -> Any:
+        """Make one call from `ENDPOINTS` and return its parsed JSON body (None when the body is empty).
+
+        A failure raises `JiraUnreachable` (connection, TLS, timeout: retry later) or `JiraError`, from this frame, which
+        holds no httpx object: `_exchange` hands back plain values only.
+        """
         endpoint = ENDPOINTS.get(name)
         if endpoint is None:
             raise JiraError(f"{name!r} is not an allowed endpoint")
@@ -310,32 +493,71 @@ class JiraClient:
         )
         method = endpoint.method
         log.debug("jira %s %s", method, path)
-        # Every httpx error holds the request, and the request holds the auth header. `raise ... from None` would
-        # still keep it as `__context__`, so only its type name is kept, and the new error is raised after the
-        # `except` block, with no cause and no context.
-        failure = ""
-        unreachable = False
-        try:
-            response = self._http.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            failure = type(exc).__name__
-            unreachable = isinstance(exc, httpx.TransportError)
-        if unreachable:
-            raise JiraUnreachable(
-                f"Jira {method} {path} unreachable: {failure}", method=method, path=path
-            )
-        if failure:
-            raise JiraError(
-                f"Jira {method} {path} failed: {failure}", method=method, path=path
-            )
-        if response.is_error:
-            raise JiraError(
-                f"Jira {method} {path} failed with {response.status_code}: {_error_text(response)}",
+        reply = self._exchange(method, path, kwargs)
+        if reply.failure:
+            error = JiraUnreachable if reply.unreachable else JiraError
+            raise error(
+                f"Jira {method} {path} {reply.failure}",
                 method=method,
                 path=path,
-                status=response.status_code,
+                status=reply.status,
             )
-        return response
+        return reply.data
+
+    def _exchange(self, method: str, path: str, kwargs: Mapping[str, Any]) -> _Reply:
+        """Send one request and keep only plain values from it. Only a BaseException (Ctrl+C) gets out.
+
+        The request, the response and every httpx error hold the Authorization header, and `raise ... from None` would
+        still keep an error as `__context__`. They exist only in this frame and the httpx frames below it, and since it
+        always returns, no traceback ever holds them. An error leaves as its type name only, because its message can
+        quote the request.
+        """
+        try:
+            return _reply(self._http.request(method, path, **kwargs), self._hide)
+        except httpx.TransportError as exc:
+            return _Reply(
+                failure=f"unreachable: {type(exc).__name__}", unreachable=True
+            )
+        except Exception as exc:  # noqa: BLE001 - not only httpx.HTTPError: any of them may hold the request
+            return _Reply(failure=f"failed: {type(exc).__name__}")
+
+    def _hide(self, text: str) -> str:
+        """`text` with the token and the Basic-auth value masked.
+
+        Used on text from Jira (a server or proxy may quote the request) and on everything sent to it: agents and the
+        target repo's tests may see the environment, so a log or test output can carry the token.
+        """
+        for secret in self._secrets:
+            text = text.replace(secret.reveal(), "***")
+        return text
+
+    def _hide_bytes(self, data: bytes) -> bytes:
+        for secret in self._secrets:
+            data = data.replace(secret.reveal().encode(), b"***")
+        return data
+
+    def _hide_body(self, body: TicketBody) -> TicketBody:
+        """`body` with every text masked, before anything in it is cut, rendered or sent."""
+        hide = self._hide
+        return replace(
+            body,
+            requirement=hide(body.requirement),
+            task=hide(body.task),
+            title=hide(body.title),
+            reason=hide(body.reason),
+            acceptance_criteria=tuple(hide(c) for c in body.acceptance_criteria),
+            last_test_output=hide(body.last_test_output),
+            attempts=tuple(
+                replace(
+                    row,
+                    rung=hide(row.rung),
+                    outcome=hide(row.outcome),
+                    summary=hide(row.summary),
+                )
+                for row in body.attempts
+            ),
+            requirement_title=hide(body.requirement_title),
+        )
 
     # -- issue types -----------------------------------------------------------------------------------------
 
@@ -348,7 +570,7 @@ class JiraClient:
                 "issue_types",
                 {"project": project},
                 params={"startAt": start, "maxResults": PAGE_SIZE},
-            ).json()
+            )
             page = data.get("issueTypes") or []
             found += [IssueType(str(t["id"]), str(t["name"])) for t in page]
             start += len(page)
@@ -393,14 +615,12 @@ class JiraClient:
             "parent": {"key": epic},
             "labels": _labels(labels),
         }
-        data = self._request("issue_create", json={"fields": fields}).json()
+        data = self._request("issue_create", json={"fields": fields})
         return str(data["key"])
 
     def get_issue(self, key: str, fields: Sequence[str] = ()) -> dict[str, Any]:
         params = {"fields": ",".join(fields)} if fields else None
-        data: dict[str, Any] = self._request(
-            "issue_get", {"key": key}, params=params
-        ).json()
+        data: dict[str, Any] = self._request("issue_get", {"key": key}, params=params)
         return data
 
     def delete_issue(self, key: str) -> None:
@@ -408,26 +628,64 @@ class JiraClient:
         self._request("issue_delete", {"key": key})
 
     def attach(self, key: str, path: Path) -> str:
-        """Upload one file to the issue; returns the stored file name."""
-        failure = ""
+        """Upload one file to an existing issue; returns the stored file name.
+
+        A missing or unreadable file raises `MissingAttachments` before anything is sent.
+        """
+        path = Path(path)
+        problems = check_attachments([path])
         content = b""
-        try:
-            content = path.read_bytes()
-        except OSError as exc:
-            failure = f"{type(exc).__name__}: {exc.strerror or exc}"
-        if failure:
-            raise JiraError(
-                f"attachment {path.name} for {key} can't be read ({failure})"
-            )
+        if not problems:
+            try:
+                content = path.read_bytes()
+            except OSError as exc:  # it changed after the check
+                problems = [
+                    AttachmentProblem(path, f"unreadable: {type(exc).__name__}")
+                ]
+        if problems:
+            raise MissingAttachments(problems)
+        return self._upload(key, path.name, content)
+
+    def _upload(
+        self,
+        key: str,
+        name: str,
+        content: bytes,
+        mime: str = "application/octet-stream",
+    ) -> str:
         data = self._request(
             "issue_attach",
             {"key": key},
             headers={"X-Atlassian-Token": "no-check"},
-            files={"file": (path.name, content, "application/octet-stream")},
-        ).json()
+            files={"file": (name, self._hide_bytes(content), mime)},
+        )
         if isinstance(data, list) and data and isinstance(data[0], dict):
-            return str(data[0].get("filename", path.name))
-        return path.name
+            return str(data[0].get("filename", name))
+        return name
+
+    def comment(
+        self, issue_key: str, text: str, attachment: Path | None = None
+    ) -> CommentResult:
+        """Add a comment of at most 280 characters to an existing issue, attaching `attachment` first if given (D27).
+
+        The text becomes one line, and longer text is cut to 280 characters ending in "…": details belong in the
+        attachment. The file is checked before any Jira call, so a missing one raises `MissingAttachments` and changes
+        nothing.
+        """
+        posted = cut(one_line(self._hide(text)), MAX_COMMENT_CHARS)
+        if not posted:
+            raise ValueError("a Jira comment needs text")
+        name: str | None = None
+        if attachment is not None:
+            problems = check_attachments([attachment])
+            if problems:
+                raise MissingAttachments(problems, effect="no comment was added")
+            name = self.attach(issue_key, Path(attachment))
+        data = self._request(
+            "issue_comment", {"key": issue_key}, json={"body": short_doc([posted])}
+        )
+        comment_id = str(data.get("id", "")) if isinstance(data, dict) else ""
+        return CommentResult(issue_key, comment_id, posted, name)
 
     # -- sprints ---------------------------------------------------------------------------------------------
 
@@ -436,7 +694,7 @@ class JiraClient:
             "board_sprints",
             {"board_id": board},
             params={"state": state, "maxResults": PAGE_SIZE},
-        ).json()
+        )
         values = data.get("values") or []
         return dict(values[0]) if values else None
 
@@ -478,27 +736,49 @@ class JiraClient:
         labels: Sequence[str] = (),
         attachments: Sequence[Path] = (),
     ) -> EscalationResult:
-        """Create the §12 ticket, attach the files and place it in a sprint (or leave it in the backlog)."""
+        """File the §12 ticket (D27) and place it in a sprint, or leave it in the backlog.
+
+        The files are checked first: a missing or unreadable one raises `MissingAttachments` before any Jira call, so
+        nothing is created. The description is at most 280 characters; `report.md`, built from `body`, is attached
+        first, then the files in the order given (so don't pass a report.md of your own).
+        """
+        files = [Path(p) for p in attachments]
+        problems = check_attachments(files)
+        if problems:
+            raise MissingAttachments(problems, effect="no ticket was created")
+        body = self._hide_body(body)
         chosen, note = self.resolve_issue_type(target.project, issue_type)
+        notes = [note] if note else []
+        report = render_report(body, notes).encode()
         key = self.create_issue(
             project=target.project,
             issue_type_id=chosen.id,
             summary=ticket_summary(body.requirement, body.task, body.title),
-            description=to_adf(body, notes=[note] if note else []),
+            description=to_adf(body, notes),
             epic=target.epic,
             labels=labels,
         )
         log.info("jira created %s as %s", key, chosen.name)
-        # From here on the issue exists: every failure must carry its key, or a retry files it twice.
-        failure = ""
+        # From here on the issue exists: every failure must carry its key, or a retry files it twice. The error is a
+        # new one, raised after the `except` blocks: no cause or context, and no frame of the failed step behind it.
+        prefix = f"Jira issue {key} was created, but a later step failed"
+        error: JiraError
         try:
-            names, sprint = self._attach_and_place(key, target.board, attachments)
+            names, sprint = self._attach_and_place(key, target.board, report, files)
         except JiraError as exc:
-            exc.issue_key = key
-            raise
+            kind = JiraUnreachable if isinstance(exc, JiraUnreachable) else JiraError
+            error = kind(
+                f"{prefix}: {exc}",
+                method=exc.method,
+                path=exc.path,
+                status=exc.status,
+                issue_key=key,
+            )
         except Exception as exc:  # noqa: BLE001 - any failure here must still report the key
-            # Kept as text and raised after the block, so nothing from the failed step stays reachable.
-            failure = f"{type(exc).__name__}: {str(exc)[:MAX_ERROR_TEXT]}"
+            error = JiraError(
+                f"{prefix}: {type(exc).__name__}: {self._hide(str(exc))[:MAX_ERROR_TEXT]}",
+                issue_key=key,
+            )
         else:
             log.info("jira %s placed in %s", key, sprint.describe())
             return EscalationResult(
@@ -510,16 +790,14 @@ class JiraClient:
                 sprint=sprint,
                 attachments=names,
             )
-        raise JiraError(
-            f"Jira issue {key} was created, but a later step failed ({failure})",
-            issue_key=key,
-        )
+        raise error
 
     def _attach_and_place(
-        self, key: str, board: int, attachments: Sequence[Path]
+        self, key: str, board: int, report: bytes, files: Sequence[Path]
     ) -> tuple[tuple[str, ...], SprintChoice]:
-        names = tuple(self.attach(key, path) for path in attachments)
+        names = [self._upload(key, REPORT_NAME, report, "text/markdown")]
+        names += [self.attach(key, path) for path in files]
         sprint = self.choose_sprint(board)
         if sprint.sprint_id is not None:
             self.move_to_sprint(sprint.sprint_id, [key])
-        return names, sprint
+        return tuple(names), sprint

@@ -1,9 +1,21 @@
-"""The escalation client: a small Jira Cloud REST client (spec §12)."""
+"""The escalation client: a small Jira Cloud REST client (spec §12, D27)."""
 
-from ultron.jira.body import AttemptRow, TicketBody, ticket_summary, to_adf
+from ultron.jira.body import (
+    MAX_COMMENT_CHARS,
+    MAX_DESCRIPTION_CHARS,
+    REPORT_NAME,
+    AttemptRow,
+    TicketBody,
+    description_text,
+    render_report,
+    ticket_summary,
+    to_adf,
+)
 from ultron.jira.client import (
     ENDPOINTS,
     ENV_VARS,
+    AttachmentProblem,
+    CommentResult,
     EscalationResult,
     IssueType,
     JiraClient,
@@ -12,13 +24,20 @@ from ultron.jira.client import (
     JiraError,
     JiraTarget,
     JiraUnreachable,
+    MissingAttachments,
     SprintChoice,
+    check_attachments,
 )
 
 __all__ = [
     "ENDPOINTS",
     "ENV_VARS",
+    "MAX_COMMENT_CHARS",
+    "MAX_DESCRIPTION_CHARS",
+    "REPORT_NAME",
+    "AttachmentProblem",
     "AttemptRow",
+    "CommentResult",
     "EscalationResult",
     "IssueType",
     "JiraClient",
@@ -27,8 +46,12 @@ __all__ = [
     "JiraError",
     "JiraTarget",
     "JiraUnreachable",
+    "MissingAttachments",
     "SprintChoice",
     "TicketBody",
+    "check_attachments",
+    "description_text",
+    "render_report",
     "ticket_summary",
     "to_adf",
 ]
