@@ -171,9 +171,14 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R2 | First implementation; MCP Inspector used while building | Failed (5 tests): hostile config_snapshot passed on unlabelled; repo text in errors unlabelled; C1 controls kept; stdout fd 1 not protected |
-| 2 | R3 | Validate snapshot values (types and ranges) and label anything repo-derived, errors included; strip all C1 controls; move fd 1 to stderr and write the protocol to a duplicate; children get stdin=DEVNULL | In progress |
+| 2 | R3 | Validate snapshot values (types and ranges) and label anything repo-derived, errors included; strip all C1 controls; move fd 1 to stderr and write the protocol to a duplicate; children get stdin=DEVNULL; 256 KB caps | Developer green (4174 passed, all 63 of test_t36.py); in testing |
 | 2026-11-11 | result | T10 attempt 3 | adhyaanilkumar | approve | |
 | 2026-11-11 | result | T05 reopen | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T10 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T05 (reopen) into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | post-merge | v0-design after T10+T05 | engine | send back to T28 | 1 failed, 6275 passed: T28's fresh-repo prune test expects exactly the mark and lock; T05's approved fix adds activity.turn.lock (T05 plan risk 3). Test-only update in T28 |
+
+### T12 · Attempt policy
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R3 | First implementation (`attempts.py`, `decide()`) | Developer green (6344 passed; only the known T28 test failed); in testing |
