@@ -94,3 +94,12 @@ Decided 2026-11-10 by the owner (lesson L3 in `sdlc/v0/lessons.md`):
   - Merged tasks reopen.
   - A send-back isn't a failed attempt and doesn't climb a rung.
 - **Recorded** as a `gate.sent_back` event (who, when, from which gate, to which stage, comment), in `decisions.md`.
+
+## Resume an agent's session after a usage limit
+Decided 2026-11-11 by the owner (lesson L11 in `sdlc/v0/lessons.md`):
+- **What:** record each attempt's Agent SDK session id in the event log. After a usage limit, crash or reboot, `ultron resume` reopens that session so the agent continues mid-thought, instead of rerunning the attempt in a fresh session (spec §11.4 today).
+- **Engine behaviour:**
+  - The resumed session keeps the attempt's number and rung; the stop isn't counted.
+  - If the session can't be reopened (expired, missing, different adapter), fall back to rerunning the attempt from the worktree as now, and record which happened.
+  - `ultron_resume_task` for a `held` task uses the same path, adding the user's note as a new message.
+- **Why:** in the V0 self-build, T06 (R5) and T25 hit the 5-hour limit mid-attempt and were resumed from where they stopped, which saved repeating the expensive part of the run.

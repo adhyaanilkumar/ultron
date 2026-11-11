@@ -47,6 +47,7 @@ confirm or change it during this review.
 | D24 | **ultron uses deployment and maintenance infrastructure but never builds it on its own.** It uses them through a small contract in `ultron.toml` (§10.1): only `test` is required, and `deploy` and `rollback` are optional but come as a pair. If a repo needs infrastructure built, that's an ordinary requirement through the pipeline, with a human-steps checklist and a cost table (§7.3). Accounts, credentials, payments and provisioning are always done by the human. Researched 2026-11-10. | Confirmed (2026-11-10) |
 | D25 | **Model and effort per task, raised on failure.** The decomposition agent scores each task's complexity with a fixed rubric and picks a starting **rung** (a model plus effort level, from Haiku 5.5 medium up to Opus 5.5 max). Every counted failed attempt moves the task up one rung. Fable is never used unless the owner approves its cost for a requirement (§11.4). Researched 2026-11-10. | Confirmed (2026-11-10, spec approval) |
 | D26 | **ultron is distributed, not hosted.** Each user runs their own copy locally: Claude Code starts the MCP server over stdio, with the user's own Claude login. The ultron GitHub repo is also a Claude Code plugin marketplace, and the plugin runs a pinned release through `uvx`. A version tag triggers a GitHub Actions release. A hosted HTTP MCP server is in the backlog (§5.3). | Confirmed (2026-11-10) |
+| D27 | **Short tickets and `call_for_edit`.** A ticket's description stays within 280 characters unless more is required; details go in an attached report, because people get overwhelmed reading AI content. Before filing, the engine checks every attachment exists; a missing one sends the task to `call_for_edit`, where the task's developer agent adds it. After filing, the user can also send an escalated task to `call_for_edit` when the assigned developer needs more context or has questions (§3, §12). | Confirmed (2026-11-11, owner) |
 
 Features for later versions are in `sdlc/backlog.md`: the web page, team sync, other host agents and ultron agents
 (Codex first), direct peer-to-peer messaging, the registry, and the eval reviewer agent.
@@ -268,7 +269,7 @@ The bracketed steps happen only when they apply.
 **Task states:**
 `pending (deps unmet) → planning → awaiting_plan → (changes → planning)* → plan_approved → attempt k (coding →
 testing) → passed → awaiting_result → approved | rejected`, plus `failed` after `max_attempts` attempts.
-`rejected` and `failed` lead to `escalated`. A stopped ultron agent leads to `held`, the next attempt, or
+`rejected` and `failed` lead to `escalated` automatically (the engine, not a gate). On the way, the engine checks the ticket's attachments: if any is missing the task goes to **`call_for_edit`**, where the task's developer agent (same rung, not an attempt, never touching code) adds it, and the task then becomes `escalated` (D27). After filing, the user can also send an `escalated` task to `call_for_edit` with a question when the assigned developer needs more context; the agent's answer is attached to the ticket and the task returns to `escalated`. A stopped ultron agent leads to `held`, the next attempt, or
 `escalated` (§9.1). A task whose dependency is escalated becomes `blocked` and is never
 merged on its own.
 
@@ -451,6 +452,7 @@ and monthly hosting (backlog).
 | `ultron_explain` | Why an attempt failed or a task was escalated, from the engine's records | No (read) |
 | `ultron_monitor` | Live ultron agent activity: who is running, their recent steps, progress and usage. It can follow from a cursor, or show one ultron agent's recent transcript (§9.1). | No (read) |
 | `ultron_stop` | Ends a running ultron agent with a reason, then `retry`, `hold` or `escalate` the task (§9.1) | No, because it can only end or pause work, never advance it |
+| `ultron_call_for_edit` | Sends an `escalated` task to `call_for_edit` with the user's question; the task's developer agent answers and the answer is attached to its ticket (D27) | **Human-confirmed** through a form |
 | `ultron_resume_task` | Resumes a `held` task from where it stopped, with an optional note from the user as feedback | **Human-confirmed** through a form, because it restarts work the host or engine stopped |
 | `ultron_settings` | The gate settings and `max_attempts` in force | No (read) |
 | `ultron_review` | Opens the review form for something waiting at a gate | **The decision is the human's**, through the form |
@@ -868,11 +870,16 @@ only the spec wording (research found task wording alone predicts difficulty poo
   ultron falls back to Story and says so in the ticket.
 - **The engine creates the ticket, never a model.** The ticket has:
   - the title `[ultron] R<n>/T<k> <title>`;
-  - the requirement, the task, the acceptance criteria and the reason (all attempts failed / rejected with comments /
-    cap reached / stopped, with the stop reason);
-  - the last test output;
-  - attachments: all attempt logs and `plan.md`;
+  - a **description within 280 characters** unless more is required (D27): the reason in one line (all attempts
+    failed / rejected with comments / cap reached / stopped, with the stop reason) and a pointer to the report;
+  - attachments: `report.md` (the requirement, the task, the acceptance criteria, each attempt's rung and result, the
+    last test output), all attempt logs and `plan.md`;
   - labels.
+- **Check, then file (D27):** before creating the ticket the engine checks every attachment exists. A missing one sends
+  the task to `call_for_edit` (§3); no ticket is created until it is added.
+- **Call for edit after filing:** `ultron_call_for_edit(task, question)` (human-confirmed) sends an escalated task back
+  to its developer agent with the question. The answer is attached to the ticket with a comment of at most 280
+  characters, and the task returns to `escalated`. Not an attempt.
 - **Sprint:** the board already runs **2-week sprints**, and ultron uses them as they are. It **never creates or
   changes sprints**. A ticket goes into the board's **active** sprint. If none is active, it goes into the next
   planned sprint, and if none is planned, into the backlog. Whichever happened is recorded in the event log.
