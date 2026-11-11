@@ -80,3 +80,40 @@ No edits to T04/T05/T08 code or tests, `tests/acceptance/`, `tasks.md`, `tasks.j
 - AC4: every decision event has who, time, channel, decision, comment; `spec` has the version.
 - AC5: regenerate `decisions.md` twice, compare bytes; rows in event order.
 - AC6: one case each for `spec` and `plan` and `intent` (drafting state + comment for the next run; intent after D28).
+
+## Attempt 2 (R4)
+Attempt 1 failed 4 acceptance tests (`tests/acceptance/test_t10.py`, ba396c2). Only `gates.py` and
+`tests/engine/test_gates.py` change.
+
+**Causes**
+1. `test_ac2_a_forged_config_change_cannot_make_a_locked_gate_auto[merge|deploy|rollback]`: `settings_from` forced
+   locked gates to `human` in the snapshot but then folded every `config_change`, so a `config_change` in the log (one
+   `change_gate` would never write) made `mode("merge")` read `auto`.
+2. `test_ac3_auto_escalation_is_refused_for_a_task_that_is_not_failing`: `_check_auto` returned early for the
+   `escalation` gate, and nothing else checked the task had reached that gate, so an auto approval (and a human one,
+   the same gap) was written for a task in `awaiting_plan`. `gate_reached` also counted any `escalation` decision as
+   "reached", so such a decision would have frozen that task's mode against later changes.
+
+**Fixes (order of work: failing tests in `tests/engine/test_gates.py` first, then `gates.py`)**
+- Locked gates read `human` at every layer: `GateSettings.mode` returns `human` for a locked gate whatever the modes
+  or changes say; `settings_from` forces them `human` and skips any `config_change` for a locked gate; `change_gate`
+  keeps refusing anything but `human` for them. `settings_from` also ignores a `config_change` that `change_gate`
+  could not have written (not by a human identity, an unknown gate, a mode outside `human`/`auto`), and reads a
+  snapshot mode outside `human`/`auto` as `human` (fail safe).
+- The escalation gate is reached only by a task in `failed`, `rejected`, `call_for_edit` or `escalated` (T08 as it
+  stands, D27): failed or rejected tasks, a stop with `then=escalate` and the spending cap (§9.1, FR18) all go there,
+  and D29's `attachment_missing` from any escalating state goes to `call_for_edit`. `decide` refuses an `escalation`
+  decision (auto or human) for a task in any other state and writes nothing. `blocked` is no longer counted: T08
+  never escalates a blocked task, so it gets no ticket and no escalation gate.
+- `gate_reached("escalation", task)` is decided by the task's current state only, never by a decision event, so a
+  decision on an unreached escalation gate can't freeze the task's mode. (A D29 stop in `call_for_edit` that returns
+  the task to an unfinished state leaves the gate; its next arrival takes the mode in force then.)
+
+**Risks**: D29's T08 rerun may add transitions into `call_for_edit` from more states; the set above already covers
+them (the reached check reads states, not triggers). Repeated escalation decisions for one task are not refused
+(T08's fold ignores escalation decisions; the engine's filing retries are out of T10's scope).
+
+**Proof**: new tests in `tests/engine/test_gates.py` (forged change and snapshot on locked gates, `GateSettings`
+built by hand, escalation decisions refused for every non-escalating state, auto and human, nothing written;
+reached ignores a forged escalation decision), plus all of `tests/acceptance/test_t10.py`; `make build`, `make lint`,
+`make test`.
