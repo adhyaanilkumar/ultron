@@ -176,3 +176,4 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | result | T05 reopen | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T10 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T05 (reopen) into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | post-merge | v0-design after T10+T05 | engine | send back to T28 | 1 failed, 6275 passed: T28's fresh-repo prune test expects exactly the mark and lock; T05's approved fix adds activity.turn.lock (T05 plan risk 3). Test-only update in T28 |
