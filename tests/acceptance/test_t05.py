@@ -14,18 +14,33 @@ Rerun after the tasks.md revision (each criterion has a `verify_with`):
   a repair that must wait for a write in progress instead of cutting it.
 - AC5 `pytest`: `test_ac5_*`, one round-trip per event type, with non-ASCII in every free-text field.
 - No T05 test may be skipped or expected to fail: `test_no_t05_test_is_skipped_*`.
+
+Reopen for lock starvation (R4): `test_reopen_*`. The once-flaky AC2 test 30 times unloaded and 30 times with a
+busy process per CPU, under a duration bound; mutual exclusion with threads and processes together (no torn or
+interleaved line, strict seq, no lost update); holders and waiters killed while holding the lock or the turn lock;
+the kept read handle against other writers, git, resets under the lock and in-place rewrites; `os.replace` as the
+plan's risk 1 says; no handle leaks; the Linux branch still on `fcntl.flock`.
 """
 
 import ast
+import contextlib
+import gc
+import importlib.util
 import json
+import os
+import random
 import shlex
+import shutil
+import statistics
 import subprocess
 import sys
 import threading
 import time
 import tomllib
+import types
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +48,7 @@ import pytest
 
 from ultron import __version__
 from ultron.store import events as ev
-from ultron.store._filelock import LOCK_BACKEND
+from ultron.store._filelock import LOCK_BACKEND, FileLock
 from ultron.store.eventlog import (
     CorruptLogError,
     EventLog,
@@ -1772,3 +1787,1184 @@ def test_no_t05_store_test_is_skipped_when_run(tmp_path: Path) -> None:
     }
     assert counts["skipped"] == 0 and counts["failures"] == 0 and counts["errors"] == 0
     assert counts["tests"] >= 30, counts
+
+
+# --- reopen (R4): lock starvation ----------------------------------------------------------------------------
+# The defect: `test_ac2_engine_lock_path_non_ascii_paths_and_payloads` took ~40 s and failed about 1 run in 11 on
+# Windows under load. The fix keeps one read handle per `EventLog` (opened outside the lock, revalidated under it)
+# and adds a turn lock (`*.turn.lock`) so a waiter goes before the releaser. These tests check the symptom is gone
+# and that neither change costs exclusion, liveness or freshness.
+
+FLAKY_RUNS = 30
+# Bounds per run of the once-flaky test (its own deadline is 45 s). Measured by the testing agent (24 CPUs): with
+# the fix, mean 0.50 s and max 0.80 s unloaded, mean 2.79 s and max 5.31 s with 24 busy processes. The pre-fix code
+# (40b76f2) through the same loop: mean 8.2 s unloaded with runs of 39, 41 and 45 s (the deadline), and up to 26 s
+# loaded. The developer measured up to 9.5 s loaded with the fix (15.5 s with 36 busy processes).
+FLAKY_UNLOADED_MAX_S = 10.0
+FLAKY_UNLOADED_MEAN_S = 3.0
+FLAKY_LOADED_MAX_S = 25.0
+FLAKY_LOADED_MEAN_S = 10.0
+
+BUSY = """
+import sys, time
+end = time.monotonic() + float(sys.argv[1])
+while time.monotonic() < end:
+    pass
+"""
+
+
+@contextlib.contextmanager
+def _cpu_load(seconds: float) -> Iterator[int]:
+    """One busy-loop process per logical CPU for the block (killed at the end)."""
+    procs = [_spawn(BUSY, str(seconds)) for _ in range(os.cpu_count() or 2)]
+    try:
+        yield len(procs)
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
+
+
+def _run_flaky_test(tmp_path: Path, runs: int) -> list[float]:
+    times: list[float] = []
+    for n in range(runs):
+        run_dir = tmp_path / f"run-{n:02d}"
+        run_dir.mkdir()
+        started = time.monotonic()
+        test_ac2_engine_lock_path_non_ascii_paths_and_payloads(run_dir)
+        times.append(time.monotonic() - started)
+    return times
+
+
+def _report(label: str, times: list[float]) -> str:
+    return (
+        f"{label}: {len(times)} runs, mean {statistics.mean(times):.2f} s, "
+        f"median {statistics.median(times):.2f} s, max {max(times):.2f} s, "
+        f"min {min(times):.2f} s; all {[round(t, 2) for t in times]}"
+    )
+
+
+def test_reopen_flaky_ac2_test_30_runs_unloaded(tmp_path: Path) -> None:
+    times = _run_flaky_test(tmp_path, FLAKY_RUNS)
+    print(_report("unloaded", times), flush=True)
+    assert max(times) <= FLAKY_UNLOADED_MAX_S, _report("unloaded", times)
+    assert statistics.mean(times) <= FLAKY_UNLOADED_MEAN_S, _report("unloaded", times)
+
+
+def test_reopen_flaky_ac2_test_30_runs_with_every_cpu_busy(tmp_path: Path) -> None:
+    with _cpu_load(FLAKY_RUNS * DEADLINE_S) as busy:
+        time.sleep(0.5)  # let the busy processes start
+        times = _run_flaky_test(tmp_path, FLAKY_RUNS)
+    label = f"{busy} busy processes"
+    print(_report(label, times), flush=True)
+    assert max(times) <= FLAKY_LOADED_MAX_S, _report(label, times)
+    assert statistics.mean(times) <= FLAKY_LOADED_MEAN_S, _report(label, times)
+
+
+# --- reopen: probing a lock from outside, with the backend's own call --------------------------------------------
+
+
+def _held(path: Path) -> bool:
+    """Whether another handle holds the OS lock on `path` now (takes and drops it if free)."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0))
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return True
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _turn(lock: Path) -> Path:
+    return FileLock(lock).turn_path
+
+
+def _kill(proc: "subprocess.Popen[bytes]") -> None:
+    if proc.poll() is None:
+        proc.kill()
+    proc.communicate(timeout=30)
+
+
+def _assert_free(lock: Path) -> None:
+    deadline = time.monotonic() + 5
+    while _held(lock) or _held(_turn(lock)):
+        assert time.monotonic() < deadline, (
+            f"left held: lock {_held(lock)}, turn {_held(_turn(lock))}"
+        )
+        time.sleep(0.01)
+
+
+def test_reopen_probe_sees_a_held_lock_and_a_held_turn(tmp_path: Path) -> None:
+    """The probe the tests below rely on: it sees `FileLock` holding either lock, in this process too."""
+    lock = tmp_path / "x.lock"
+    assert not _held(lock)
+    with FileLock(lock):
+        assert _held(lock) and not _held(_turn(lock))
+    with FileLock(_turn(lock)):
+        assert _held(_turn(lock)) and not _held(lock)
+    _assert_free(lock)
+
+
+# --- reopen: mutual exclusion is still airtight ------------------------------------------------------------------
+
+# Threads in several processes. Even threads share one `EventLog` (and its kept reader), odd threads have their
+# own. Payloads in multi-byte text of many lengths, every 10th past the 64 KiB tail chunk, and batches of 3.
+MIXED_WRITER = r"""
+import json, sys, threading, time
+from pathlib import Path
+from ultron.store._filelock import LOCK_BACKEND
+from ultron.store.eventlog import EventLog
+from ultron.store.events import NewEvent
+
+path, lock, ready, go, p, threads, n = sys.argv[1], sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5], int(sys.argv[6]), int(sys.argv[7])
+text = bytes.fromhex(sys.argv[8]).decode("utf-8")
+SIZE = lambda p, t, i: 3000 if i % 10 == 9 else 1 + (7 * i + 3 * t + len(p)) % 40
+shared = EventLog(path, lock, lock_timeout=60)
+errors = []
+
+def work(t):
+    log = shared if t % 2 == 0 else EventLog(path, lock, lock_timeout=60)
+    def new(i):
+        return NewEvent(actor="engine", type="probe", requirement="R1", task=p,
+                        data={"p": p, "t": t, "i": i, "text": text * SIZE(p, t, i)})
+    try:
+        i = 0
+        while i < n:
+            if i % 7 == 3 and i + 3 <= n:
+                log.append([new(i + k) for k in range(3)])
+                i += 3
+            else:
+                log.append(new(i))
+                i += 1
+    except BaseException as exc:
+        errors.append(repr(exc))
+
+ready.touch()
+end = time.monotonic() + 40
+while not go.exists():
+    if time.monotonic() > end:
+        sys.exit(3)
+    time.sleep(0.001)
+ts = [threading.Thread(target=work, args=(t,)) for t in range(threads)]
+for t in ts:
+    t.start()
+for t in ts:
+    t.join()
+print(json.dumps({"backend": LOCK_BACKEND, "errors": errors}))
+"""
+
+
+def _mixed_size(p: str, t: int, i: int) -> int:
+    return 3000 if i % 10 == 9 else 1 + (7 * i + 3 * t + len(p)) % 40
+
+
+def test_reopen_exclusion_threads_and_processes_together(tmp_path: Path) -> None:
+    procs_n, threads_n, per_thread = 4, 4, 50
+    base = tmp_path / "wörk 日本"
+    path = base / "sdlc" / "requirements" / "R1" / "events.jsonl"
+    lock = base / ".ultron" / "locks" / "R1.events.lock"
+    go, stop, reader_ready = tmp_path / "go", tmp_path / "stop", tmp_path / "rr"
+    ready = [tmp_path / f"ready-{k}" for k in range(procs_n)]
+    deadline = time.monotonic() + 120
+    reader = _spawn(READER, str(path), str(reader_ready), str(stop))
+    procs = [
+        _spawn(
+            MIXED_WRITER,
+            str(path),
+            str(lock),
+            str(ready[k]),
+            str(go),
+            f"P{k}",
+            str(threads_n),
+            str(per_thread),
+            TEXT_U.encode().hex(),
+        )
+        for k in range(procs_n)
+    ]
+    # threads in this process too, through their own objects and one shared object
+    errors: list[BaseException] = []
+    shared = EventLog(path, lock, lock_timeout=60)
+
+    def work(t: int) -> None:
+        log = shared if t % 2 == 0 else EventLog(path, lock, lock_timeout=60)
+        try:
+            i = 0
+            while i < per_thread:
+                size = 3 if i % 7 == 3 and i + 3 <= per_thread else 1
+                log.append(
+                    [
+                        ev.NewEvent(
+                            actor="engine",
+                            type="probe",
+                            requirement="R1",
+                            task="main",
+                            data={
+                                "p": "main",
+                                "t": t,
+                                "i": i + k,
+                                "text": TEXT_U * _mixed_size("main", t, i + k),
+                            },
+                        )
+                        for k in range(size)
+                    ]
+                )
+                i += size
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(t,)) for t in range(threads_n)]
+    try:
+        _wait(
+            lambda: reader_ready.exists() and all(r.exists() for r in ready),
+            deadline,
+            "writers to start",
+        )
+        go.touch()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=max(1.0, deadline - time.monotonic()))
+        for proc in procs:
+            out, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
+            assert proc.returncode == 0, err.decode(errors="replace")
+            report = json.loads(out)
+            assert report == {"backend": EXPECTED_BACKEND, "errors": []}
+        time.sleep(0.2)
+        stop.touch()
+        out, err = reader.communicate(timeout=max(1.0, deadline - time.monotonic()))
+        assert reader.returncode == 0, err.decode(errors="replace")
+        seen = json.loads(out)
+    finally:
+        for proc in [*procs, reader]:
+            if proc.poll() is None:
+                proc.kill()
+    assert errors == []
+    assert not any(t.is_alive() for t in threads)
+
+    total = (procs_n + 1) * threads_n * per_thread
+    data = path.read_bytes()
+    text = data.decode("utf-8")  # strict: a torn multi-byte character fails here
+    assert text.endswith("\n") and "\r" not in text
+    lines = data.split(b"\n")[:-1]
+    assert len(lines) == total
+    objs = [json.loads(line) for line in lines]  # no torn or interleaved line
+    assert [o["seq"] for o in objs] == list(range(1, total + 1))
+    writers = {(f"P{k}", t) for k in range(procs_n) for t in range(threads_n)}
+    writers |= {("main", t) for t in range(threads_n)}
+    for p, t in writers:
+        mine = [o for o in objs if (o["data"]["p"], o["data"]["t"]) == (p, t)]
+        assert [o["data"]["i"] for o in mine] == list(range(per_thread)), (p, t)
+        for o in mine:
+            assert o["data"]["text"] == TEXT_U * _mixed_size(p, t, o["data"]["i"])
+            assert o["task"] == p
+    # a batch is written whole: its 3 events are consecutive lines with one time stamp
+    for n, o in enumerate(objs):
+        i = o["data"]["i"]
+        if i % 7 == 3 and i + 3 <= per_thread:
+            batch = objs[n : n + 3]
+            key = (o["data"]["p"], o["data"]["t"])
+            assert [(b["data"]["p"], b["data"]["t"]) for b in batch] == [key] * 3
+            assert [b["data"]["i"] for b in batch] == [i, i + 1, i + 2]
+            assert len({b["time"] for b in batch}) == 1
+    # a lock-free reader running throughout saw only whole prefixes of the final log
+    assert seen["errors"] == [] and seen["shrank"] == 0
+    assert seen["prefix_changed"] == 0 and seen["max"] == total
+    assert len(EventLog(path, lock).read(strict=True).events) == total
+    _assert_free(lock)
+
+
+# The lock itself, across processes and threads: a counter in shared memory, read and written back inside the
+# lock with a pause between (a lost update means two holders), plus an "inside" flag. Thread 0 of each process
+# uses a 4 ms timeout, so `LockTimeout` paths (dropping the turn lock while waiting) run all the time too.
+LOCKER = r"""
+import json, sys, threading, time
+from multiprocessing import shared_memory
+from pathlib import Path
+from ultron.store._filelock import FileLock, LockTimeout
+
+lock, name, ready, go, threads, rounds = sys.argv[1], sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
+shm = shared_memory.SharedMemory(name=name, track=False)
+buf = shm.buf
+totals = {"acquired": 0, "timeouts": 0, "violations": 0}
+mutex = threading.Lock()
+
+def work(t):
+    timeout = 0.004 if t == 0 else 60.0
+    got = timeouts = bad = 0
+    for _ in range(rounds):
+        try:
+            with FileLock(lock, timeout=timeout):
+                if buf[0]:
+                    bad += 1
+                buf[0] = 1
+                n = int.from_bytes(buf[1:9], "little")
+                time.sleep(0.0002)
+                buf[1:9] = (n + 1).to_bytes(8, "little")
+                buf[0] = 0
+                got += 1
+        except LockTimeout:
+            timeouts += 1
+    with mutex:
+        totals["acquired"] += got
+        totals["timeouts"] += timeouts
+        totals["violations"] += bad
+
+ready.touch()
+end = time.monotonic() + 40
+while not go.exists():
+    if time.monotonic() > end:
+        sys.exit(3)
+    time.sleep(0.001)
+ts = [threading.Thread(target=work, args=(t,)) for t in range(threads)]
+for t in ts:
+    t.start()
+for t in ts:
+    t.join()
+del buf
+shm.close()
+print(json.dumps(totals))
+"""
+
+
+def test_reopen_lock_exclusion_no_lost_update_with_timeouts_mixed_in(
+    tmp_path: Path,
+) -> None:
+    procs_n, threads_n, rounds = 6, 4, 40
+    lock = tmp_path / "locks" / "R1.events.lock"
+    go = tmp_path / "go"
+    ready = [tmp_path / f"ready-{k}" for k in range(procs_n)]
+    shm = shared_memory.SharedMemory(create=True, size=16)
+    try:
+        shm.buf[:16] = bytes(16)
+        procs = [
+            _spawn(
+                LOCKER,
+                str(lock),
+                shm.name,
+                str(ready[k]),
+                str(go),
+                str(threads_n),
+                str(rounds),
+            )
+            for k in range(procs_n)
+        ]
+        deadline = time.monotonic() + 120
+        totals = {"acquired": 0, "timeouts": 0, "violations": 0}
+        try:
+            _wait(lambda: all(r.exists() for r in ready), deadline, "lockers to start")
+            go.touch()
+            for proc in procs:
+                out, err = proc.communicate(
+                    timeout=max(1.0, deadline - time.monotonic())
+                )
+                assert proc.returncode == 0, err.decode(errors="replace")
+                for k, v in json.loads(out).items():
+                    totals[k] += v
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+        counter = int.from_bytes(shm.buf[1:9], "little")
+    finally:
+        shm.close()
+        shm.unlink()
+    print(f"lock exclusion: {totals}, counter {counter}", flush=True)
+    assert totals["violations"] == 0
+    assert counter == totals["acquired"], "a lost update: two holders at once"
+    assert totals["acquired"] + totals["timeouts"] == procs_n * threads_n * rounds
+    waiters = procs_n * (threads_n - 1) * rounds  # threads with a 60 s timeout
+    assert totals["acquired"] >= waiters, "a 60 s waiter timed out"
+    _assert_free(lock)
+
+
+# --- reopen: a holder or a waiter killed while holding the lock or the turn lock ---------------------------------
+
+# Appends once, then hangs inside the lock on its second append: after the line is written but before `fsync`
+# ("fsync"), or after half the line ("write"). Killed there by the test.
+HANGING_WRITER = r"""
+import os, sys, time
+from pathlib import Path
+from ultron.store.eventlog import EventLog
+from ultron.store.events import NewEvent
+
+path, lock, where, inside, text = sys.argv[1], sys.argv[2], sys.argv[3], Path(sys.argv[4]), bytes.fromhex(sys.argv[5]).decode("utf-8")
+log = EventLog(path, lock)
+log.append(NewEvent(actor="engine", type="probe", requirement="R1", data={"i": 1}))
+
+def hang(*args):
+    inside.touch()
+    time.sleep(120)
+
+if where == "fsync":
+    os.fsync = hang
+else:
+    real_write = os.write
+    def half(fd, data):
+        real_write(fd, bytes(data[: len(data) // 2]))
+        hang()
+    os.write = half
+log.append(NewEvent(actor="engine", type="probe", requirement="R1", data={"i": 2, "text": text}))
+"""
+
+QUEUED_APPENDER = r"""
+import sys
+from pathlib import Path
+from ultron.store.eventlog import EventLog
+from ultron.store.events import NewEvent
+path, lock, ready = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+log = EventLog(path, lock, lock_timeout=60)
+ready.touch()
+log.append(NewEvent(actor="engine", type="probe", requirement="R1", data={"i": 99}))
+"""
+
+
+@pytest.mark.parametrize("where", ["fsync", "write"])
+def test_reopen_holder_killed_mid_append_frees_the_lock_and_the_turn(
+    tmp_path: Path, where: str
+) -> None:
+    """The holder hangs inside `append`, a waiter process holds the turn lock, and a thread waits behind it. The
+    turn holder is killed, then the holder. The thread must go on promptly, and nothing may stay held. (The turn
+    holder dies first so it can't take the lock between the two kills.)"""
+    path = tmp_path / "wörk" / "events.jsonl"
+    lock = tmp_path / ".ultron" / "locks" / "R1.events.lock"
+    inside, queued = tmp_path / "inside", tmp_path / "queued"
+    text = TEXT_U * 50
+    hanger = _spawn(
+        HANGING_WRITER, str(path), str(lock), where, str(inside), text.encode().hex()
+    )
+    waiter: subprocess.Popen[bytes] | None = None
+    result: dict[str, Any] = {}
+
+    def append_third() -> None:
+        try:
+            result["append"] = EventLog(path, lock, lock_timeout=30).append(_new(3))
+        except BaseException as exc:  # noqa: BLE001 - checked below
+            result["append"] = exc
+
+    thread = threading.Thread(target=append_third)
+    deadline = time.monotonic() + DEADLINE_S
+    try:
+        _wait(inside.exists, deadline, "the writer to hang inside the lock")
+        assert _held(lock)
+        waiter = _spawn(QUEUED_APPENDER, str(path), str(lock), str(queued))
+        _wait(queued.exists, deadline, "the queued writer to start")
+        _wait(lambda: _held(_turn(lock)), deadline, "the queued writer's turn lock")
+        thread.start()
+        time.sleep(0.3)
+        assert thread.is_alive() and "append" not in result
+        _kill(waiter)  # it held the turn lock
+        time.sleep(0.3)
+        assert thread.is_alive() and "append" not in result  # the lock is still held
+        killed = time.monotonic()
+        hanger.kill()
+        thread.join(timeout=DEADLINE_S)
+        took = time.monotonic() - killed
+    finally:
+        _kill(hanger)
+        if waiter is not None:
+            _kill(waiter)
+        thread.join(timeout=DEADLINE_S)
+    assert not thread.is_alive()
+    assert took < 5.0, f"the thread waited {took:.1f} s after the holder died"
+    if where == "fsync":
+        # the dead holder's line was written whole: the thread's event follows it
+        assert [e.seq for e in result["append"]] == [3], result["append"]
+        events = EventLog(path, lock).read(strict=True).events
+        assert [(e.seq, e.data["i"]) for e in events] == [(1, 1), (2, 2), (3, 3)]
+        assert events[1].data["text"] == text
+    else:
+        assert isinstance(result["append"], TruncatedLogError), result["append"]
+        cut = EventLog(path, lock, lock_timeout=5).repair()
+        assert cut and not cut.endswith(b"\n")
+        assert [e.seq for e in EventLog(path, lock).append(_new(3))] == [2]
+        assert [e.data["i"] for e in EventLog(path).read(strict=True).events] == [1, 3]
+    _assert_free(lock)
+
+
+TURN_WAITER = r"""
+import sys, time
+from pathlib import Path
+from ultron.store._filelock import FileLock
+lock, record, ready, tag = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
+ready.touch()
+with FileLock(lock, timeout=60):
+    with record.open("a", encoding="utf-8") as f:
+        f.write(tag + "\n")
+    time.sleep(0.01)
+"""
+
+
+def test_reopen_waiters_killed_while_holding_the_turn_lock_do_not_block_the_rest(
+    tmp_path: Path,
+) -> None:
+    """While this process holds the lock: w1 queues alone (so it holds the turn lock) and is killed; w2 then holds
+    it alone and is killed with 8 more queued behind it. The 8 must all get the lock once it is released."""
+    lock = tmp_path / "locks" / "R1.events.lock"
+    turn = _turn(lock)
+    record = tmp_path / "record"
+    procs: dict[str, subprocess.Popen[bytes]] = {}
+    deadline = time.monotonic() + 90
+
+    def start(tag: str) -> None:
+        ready = tmp_path / f"ready-{tag}"
+        procs[tag] = _spawn(TURN_WAITER, str(lock), str(record), str(ready), tag)
+        _wait(ready.exists, deadline, f"{tag} to start")
+
+    holder = FileLock(lock)
+    holder.acquire()
+    try:
+        start("w1")
+        _wait(lambda: _held(turn), deadline, "w1 to hold the turn lock")
+        start("w2")
+        time.sleep(0.3)
+        _kill(procs.pop("w1"))
+        _wait(lambda: _held(turn), deadline, "w2 to hold the turn lock")
+        for k in range(3, 11):
+            start(f"w{k}")
+        time.sleep(0.3)
+        _kill(procs.pop("w2"))  # the turn holder, with 8 waiters behind it
+        _wait(lambda: _held(turn), deadline, "another waiter to take the turn lock")
+        assert not record.exists(), "a waiter got the lock while it was held"
+        released = time.monotonic()
+        holder.release()
+        for tag, proc in procs.items():
+            _, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
+            assert proc.returncode == 0, (tag, err.decode(errors="replace"))
+        took = time.monotonic() - released
+    finally:
+        holder.release()
+        for proc in procs.values():
+            _kill(proc)
+    assert sorted(record.read_text(encoding="utf-8").split()) == sorted(procs)
+    assert took < 15.0, f"8 waiters took {took:.1f} s after the release"
+    _assert_free(lock)
+
+
+CHURNER = r"""
+import sys, time
+from pathlib import Path
+from ultron.store._filelock import FileLock
+lock, ready, go, rounds = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4])
+ready.touch()
+end = time.monotonic() + 40
+while not go.exists():
+    if time.monotonic() > end:
+        sys.exit(3)
+    time.sleep(0.001)
+for _ in range(rounds):
+    with FileLock(lock, timeout=60):
+        time.sleep(0.002)
+print("done")
+"""
+
+
+def test_reopen_many_waiters_with_random_kills_never_deadlock(tmp_path: Path) -> None:
+    """12 processes take the lock 40 times each; 4 are killed at random moments (holding the lock, the turn lock,
+    or neither). The other 8 must finish, and both locks must end free."""
+    n, rounds = 12, 40
+    lock = tmp_path / "locks" / "R1.events.lock"
+    go = tmp_path / "go"
+    ready = [tmp_path / f"ready-{k}" for k in range(n)]
+    procs = [
+        _spawn(CHURNER, str(lock), str(ready[k]), str(go), str(rounds))
+        for k in range(n)
+    ]
+    rng = random.Random(0x7505)
+    victims = rng.sample(range(n), 4)
+    deadline = time.monotonic() + 120
+    try:
+        _wait(lambda: all(r.exists() for r in ready), deadline, "churners to start")
+        go.touch()
+        for k in victims:
+            time.sleep(rng.uniform(0.05, 0.4))
+            procs[k].kill()
+        for k, proc in enumerate(procs):
+            out, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
+            if k not in victims:
+                assert proc.returncode == 0, err.decode(errors="replace")
+                assert out.strip() == b"done"
+    finally:
+        for proc in procs:
+            _kill(proc)
+    _assert_free(lock)
+    with FileLock(lock, timeout=1.0):
+        pass
+
+
+# --- reopen: the kept read handle -----------------------------------------------------------------------------
+
+APPENDER = r"""
+import sys
+from ultron.store.eventlog import EventLog
+from ultron.store.events import NewEvent
+path, lock = sys.argv[1], sys.argv[2]
+log = EventLog(path, lock)
+for line in sys.stdin:
+    k, size = map(int, line.split())
+    out = log.append([NewEvent(actor="engine", type="probe", requirement="R1",
+                               data={"by": "child", "pad": "é" * size}) for _ in range(k)])
+    print(out[-1].seq, flush=True)
+"""
+
+
+def test_reopen_kept_reader_sees_every_append_by_another_process(
+    tmp_path: Path,
+) -> None:
+    """Two long-lived objects in two processes, alternating; some lines are longer than the 64 KiB tail chunk."""
+    path, lock = tmp_path / "events.jsonl", tmp_path / "locks" / "e.lock"
+    mine = EventLog(path, lock)
+    child = subprocess.Popen(
+        [sys.executable, "-c", APPENDER, str(path), str(lock)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    assert child.stdin is not None and child.stdout is not None
+    rng = random.Random(5)
+    total = 0
+    try:
+        for r in range(40):
+            (mine_event,) = mine.append(_new(r))
+            total += 1
+            assert mine_event.seq == total, f"round {r}: stale tail"
+            k, size = rng.randint(1, 4), rng.choice([0, 10, 40_000, 70_000])
+            child.stdin.write(f"{k} {size}\n")
+            child.stdin.flush()
+            line = child.stdout.readline()
+            assert line, child.stderr.read() if child.stderr else ""
+            total += k
+            assert int(line) == total, f"round {r}: the child's tail was stale"
+    finally:
+        if child.stdin:
+            child.stdin.close()
+        child.wait(timeout=30)
+        for stream in (child.stdout, child.stderr):
+            if stream:
+                stream.close()
+    assert [e.seq for e in mine.read(strict=True).events] == list(range(1, total + 1))
+
+
+REWRITE = r"""
+import sys
+from pathlib import Path
+path, how, data = Path(sys.argv[1]), sys.argv[2], bytes.fromhex(sys.argv[3])
+if how == "truncate":  # in place: the same file, made shorter
+    with path.open("wb") as f:
+        f.write(data)
+elif how == "overwrite":  # in place: the same file and size, other bytes
+    with path.open("r+b") as f:
+        f.write(data)
+else:  # delete and write a new file, as git does
+    path.unlink()
+    path.write_bytes(data)
+"""
+
+
+def _rewrite(path: Path, how: str, data: bytes) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-c", REWRITE, str(path), how, data.hex()],
+        check=False,
+        capture_output=True,
+        timeout=DEADLINE_S,
+    )
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+
+
+def test_reopen_kept_reader_never_returns_stale_data(tmp_path: Path) -> None:
+    """Another process changes the log between appends in every way it can; each next `seq` follows the file as it
+    is now, never what the kept handle saw before."""
+    path, lock = tmp_path / "events.jsonl", tmp_path / "locks" / "e.lock"
+    log = EventLog(path, lock)
+    log.append([_new(i) for i in range(1, 6)])
+    assert [e.seq for e in log.append(_new(6))] == [6]  # the reader is open now
+    ino = os.stat(path).st_ino
+
+    _rewrite(path, "truncate", _line(1) + _line(2))  # shorter, same file
+    assert os.stat(path).st_ino == ino
+    assert [e.seq for e in log.append(_new(7))] == [3]
+
+    now = path.read_bytes()
+    lines = now.split(b"\n")[:-1]
+    swapped = b"".join(x + b"\n" for x in lines[:-1]) + lines[-1].replace(
+        b'"seq":3,', b'"seq":8,', 1
+    )
+    assert len(swapped) + 1 == len(now)
+    _rewrite(path, "overwrite", swapped + b"\n")  # same size, last seq 3 -> 8
+    assert os.stat(path).st_ino == ino and path.stat().st_size == len(now)
+    assert [e.seq for e in log.append(_new(9))] == [9]
+
+    _rewrite(path, "recreate", _line(1) + _line(2) + _line(30))  # a new file
+    assert [e.seq for e in log.append(_new(31))] == [31]
+    _rewrite(path, "recreate", _line(1))  # and again, shorter than the old one
+    assert [e.seq for e in log.append(_new(2))] == [2]
+    assert path.read_bytes().startswith(_line(1))
+    path.unlink()  # gone: a new log
+    assert [e.seq for e in log.append(_new(1))] == [1]
+
+
+def _git(repo: Path, *args: str) -> None:
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+    proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=T05",
+            "-c",
+            "user.email=t05@example.com",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=repo,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    err = proc.stderr.decode(errors="replace")
+    assert proc.returncode == 0, f"git {args}: {err}"
+    assert "unlink" not in err.lower() and "unable" not in err.lower(), err
+
+
+def test_reopen_kept_reader_follows_git_rewriting_the_log(tmp_path: Path) -> None:
+    """Real git replaces the log (checkout, stash, reset, branch switch, rm) while an `EventLog` keeps its reader
+    open; git must not be refused, and every next `seq` must follow the file git left."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    path = repo / "sdlc" / "requirements" / "R1" / "events.jsonl"
+    log = EventLog(path, tmp_path / "locks" / "R1.events.lock")
+    log.append([_new(1), _new(2)])
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "two")
+    two = path.read_bytes()
+
+    # the reader is open on this file from here on
+    assert [e.seq for e in log.append(_new(3))] == [3]
+    _git(repo, "checkout", "--", ".")
+    assert path.read_bytes() == two
+    assert [e.seq for e in log.append(_new(4))] == [3]
+    _git(repo, "stash", "-q")
+    assert path.read_bytes() == two
+    assert [e.seq for e in log.append(_new(5))] == [3]
+    _git(repo, "reset", "-q", "--hard")
+    assert path.read_bytes() == two
+
+    _git(repo, "checkout", "-q", "-b", "other")
+    assert [e.seq for e in log.append([_new(6), _new(7)])] == [3, 4]
+    _git(repo, "commit", "-q", "-am", "four")
+    four = path.read_bytes()
+    _git(repo, "checkout", "-q", "main")
+    assert path.read_bytes() == two
+    assert [e.seq for e in log.append(_new(8))] == [3]
+    _git(repo, "checkout", "-q", "-f", "other")
+    assert path.read_bytes() == four
+    assert [e.seq for e in log.append(_new(9))] == [5]
+    assert [e.data["i"] for e in log.read(strict=True).events] == [1, 2, 6, 7, 9]
+
+    _git(repo, "rm", "-q", "-r", "-f", "sdlc")
+    assert not path.exists()
+    assert [e.seq for e in log.append(_new(10))] == [1]  # a new log
+    assert [e.seq for e in log.append(_new(11))] == [2]  # the reader is open on it
+    shutil.rmtree(repo / "sdlc")  # a worktree cleaned up while the reader is open
+    assert not (repo / "sdlc").exists()
+    assert [e.seq for e in log.append(_new(12))] == [1]
+
+
+RESET_WRITER = r"""
+import sys, time
+from pathlib import Path
+from ultron.store.eventlog import EventLog
+from ultron.store.events import NewEvent
+path, lock, ready, stop, w = sys.argv[1], sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5]
+log = EventLog(path, lock, lock_timeout=60)
+ready.touch()
+i = 0
+while not stop.exists():
+    log.append(NewEvent(actor="engine", type="probe", requirement="R1", data={"w": w, "i": i}))
+    i += 1
+print(i)
+"""
+
+
+def _remove_with_retry(path: Path, retries: list[int]) -> None:
+    """Like git on Windows: retry a delete refused for a moment (an antivirus scan holding the new file)."""
+    for attempt in range(200):
+        try:
+            path.unlink()
+            return
+        except PermissionError:
+            retries[0] += 1
+            if attempt == 199:
+                raise
+            time.sleep(0.01)
+
+
+def test_reopen_kept_readers_follow_resets_under_the_lock(tmp_path: Path) -> None:
+    """3 writer processes append in a loop, each with its kept reader, while this process takes the lock 25 times
+    and replaces the log with its first half (delete, then write a new file). A writer reading a stale handle
+    would continue the old file's `seq`, leaving a gap or a repeat the strict read below would reject."""
+    path = tmp_path / "sdlc" / "requirements" / "R1" / "events.jsonl"
+    lock = tmp_path / ".ultron" / "locks" / "R1.events.lock"
+    stop = tmp_path / "stop"
+    ready = [tmp_path / f"ready-{w}" for w in range(3)]
+    procs = [
+        _spawn(RESET_WRITER, str(path), str(lock), str(ready[w]), str(stop), str(w))
+        for w in range(3)
+    ]
+    rng = random.Random(25)
+    retries = [0]
+    kept: list[int] = []
+    deadline = time.monotonic() + 120
+    try:
+        _wait(lambda: all(r.exists() for r in ready), deadline, "writers to start")
+        _wait(
+            lambda: path.exists() and path.stat().st_size > 2000,
+            deadline,
+            "a first few appends",
+        )
+        for _ in range(25):
+            time.sleep(rng.uniform(0.02, 0.08))
+            with FileLock(lock, timeout=30):
+                lines = path.read_bytes().split(b"\n")[:-1]
+                # every append since the last reset followed the file as reset, not a stale handle
+                seqs = [json.loads(line)["seq"] for line in lines]
+                assert seqs == list(range(1, len(lines) + 1)), seqs[-20:]
+                keep = lines[: len(lines) // 2]
+                _remove_with_retry(path, retries)
+                with path.open("xb") as f:
+                    f.write(b"".join(line + b"\n" for line in keep))
+                kept.append(len(keep))
+        time.sleep(0.1)
+        stop.touch()
+        for proc in procs:
+            _, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
+            assert proc.returncode == 0, err.decode(errors="replace")
+    finally:
+        stop.touch()
+        for proc in procs:
+            _kill(proc)
+    print(f"resets kept {kept} lines; delete retries {retries[0]}", flush=True)
+    events = EventLog(path, lock).read(strict=True).events  # seq 1..N, no gap
+    assert len(events) > kept[-1]
+    for w in range(3):
+        mine = [e.data["i"] for e in events if e.data["w"] == str(w)]
+        assert mine == sorted(mine) and len(set(mine)) == len(mine)
+
+
+def test_reopen_os_replace_matches_the_documented_risk(tmp_path: Path) -> None:
+    """Plan risk 1 (revised): on Windows an atomic `os.replace` onto the log is refused while a live `EventLog`
+    has appended to it; delete-then-write still works; once the object is gone, so is its handle. On Linux the
+    replace works and the next append follows the new file."""
+    path, lock = tmp_path / "events.jsonl", tmp_path / "locks" / "e.lock"
+    older = tmp_path / "older.jsonl"
+    log = EventLog(path, lock)
+    idle = EventLog(path, lock)  # never appends: holds nothing
+    log.append([_new(1), _new(2)])
+    assert [e.seq for e in log.append(_new(3))] == [3]  # the reader is open now
+    before = path.read_bytes()
+    older.write_bytes(_line(1))
+    if sys.platform == "win32":
+        with pytest.raises(PermissionError):
+            os.replace(older, path)
+        assert path.read_bytes() == before and older.exists()
+        path.unlink()  # delete, then write: works with the handle open
+        path.write_bytes(_line(1))
+        assert [e.seq for e in log.append(_new(4))] == [2]
+        # refused again: the reader now follows the new file
+        with pytest.raises(PermissionError):
+            os.replace(older, path)
+        del log
+        gc.collect()
+        os.replace(older, path)  # no live object holds a handle: `idle` never appended
+        assert [e.seq for e in idle.append(_new(5))] == [2]
+    else:
+        os.replace(older, path)
+        assert [e.seq for e in log.append(_new(4))] == [2]
+        assert [e.seq for e in idle.append(_new(5))] == [3]
+
+
+LEAK_PROBE = r"""
+import gc, json, os, subprocess, sys
+from pathlib import Path
+from ultron.store._filelock import FileLock, LockTimeout
+from ultron.store.eventlog import EventLog, TruncatedLogError
+from ultron.store.events import NewEvent
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    def handles():
+        n = wintypes.DWORD()
+        assert k32.GetProcessHandleCount(k32.GetCurrentProcess(), ctypes.byref(n))
+        return n.value
+else:
+    def handles():
+        return len(os.listdir("/proc/self/fd"))
+
+def new(i):
+    return NewEvent(actor="engine", type="probe", requirement="R1", data={"i": i})
+
+path, lock, bad = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+for _ in range(3):
+    EventLog(path, lock).append(new(0))  # warm up imports and caches
+gc.collect()
+out = {"base": handles()}
+for i in range(500):
+    EventLog(path, lock).append(new(i))
+gc.collect()
+out["after_500_dropped"] = handles()
+kept = [EventLog(path, lock) for _ in range(200)]
+for i, log in enumerate(kept):
+    log.append(new(i))
+    log.append(new(i))
+out["with_200_alive"] = handles()
+del kept, log
+gc.collect()
+out["after_200_released"] = handles()
+for i in range(100):
+    log = EventLog(path, lock)
+    log.me = log  # a reference cycle: only the garbage collector frees it
+    log.append(new(i))
+del log
+gc.collect()
+out["after_100_cycles"] = handles()
+bad.write_bytes(b'{"seq":1')
+for i in range(100):
+    try:
+        EventLog(bad, lock).append(new(i))
+    except TruncatedLogError:
+        pass
+gc.collect()
+out["after_100_truncated"] = handles()
+held = FileLock(lock)
+held.acquire()
+for i in range(20):
+    try:
+        EventLog(path, lock, lock_timeout=0.01).append(new(i))
+    except LockTimeout:
+        pass
+held.release()
+gc.collect()
+out["after_20_timeouts"] = handles()
+# a child started while an object holds a reader must not inherit it
+log = EventLog(path, lock)
+log.append(new(1))
+log.append(new(2))
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"], close_fds=False)
+del log
+gc.collect()
+spare = path.with_name("spare.jsonl")
+spare.write_bytes(path.read_bytes())
+os.replace(spare, path)  # refused on Windows if any handle on the log were left, here or in the child
+out["replace_ok"] = True
+if sys.platform != "win32":
+    out["child_fds_on_log"] = sum(
+        1 for fd in os.listdir(f"/proc/{child.pid}/fd")
+        if os.path.realpath(f"/proc/{child.pid}/fd/{fd}").endswith("events.jsonl"))
+child.kill()
+child.wait()
+print(json.dumps(out))
+"""
+
+
+def test_reopen_no_handle_leaks_after_many_event_logs(tmp_path: Path) -> None:
+    path, lock = tmp_path / "events.jsonl", tmp_path / "locks" / "e.lock"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            LEAK_PROBE,
+            str(path),
+            str(lock),
+            str(tmp_path / "bad.jsonl"),
+        ],
+        check=False,
+        capture_output=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    out = json.loads(proc.stdout)
+    print(f"handle counts: {out}", flush=True)
+    base, slack = out["base"], 10
+    # each live object that has appended holds exactly one handle: the count is real and per object
+    assert base + 200 - slack <= out["with_200_alive"] <= base + 200 + slack
+    for key in (
+        "after_500_dropped",
+        "after_200_released",
+        "after_100_cycles",
+        "after_100_truncated",
+        "after_20_timeouts",
+    ):
+        assert out[key] <= base + slack, (key, out)
+    assert out["replace_ok"] is True
+    assert out.get("child_fds_on_log", 0) == 0
+
+
+# --- reopen: the Linux branch still uses `fcntl.flock` (checked statically, and run against a stand-in) ---------
+
+FILELOCK_SRC = ROOT / "src" / "ultron" / "store" / "_filelock.py"
+EVENTLOG_SRC = ROOT / "src" / "ultron" / "store" / "eventlog.py"
+
+
+def _platform_branches(src: Path) -> tuple[str, str]:
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    ifs = [
+        n
+        for n in tree.body
+        if isinstance(n, ast.If) and ast.unparse(n.test) == "sys.platform == 'win32'"
+    ]
+    assert len(ifs) == 1, f"{src.name}: one module-level platform switch"
+    return (
+        "\n".join(ast.unparse(n) for n in ifs[0].body),
+        "\n".join(ast.unparse(n) for n in ifs[0].orelse),
+    )
+
+
+def test_reopen_linux_branch_still_uses_fcntl_flock_statically() -> None:
+    win, linux = _platform_branches(FILELOCK_SRC)
+    assert "import msvcrt" in win and "msvcrt.LK_NBLCK" in win
+    assert "LOCK_BACKEND: Final[str] = 'fcntl'" in linux
+    assert "import fcntl" in linux
+    assert "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)" in linux
+    assert "fcntl.flock(fd, fcntl.LOCK_UN)" in linux
+    assert "msvcrt" not in linux and "_winapi" not in linux
+    # both the lock and the turn lock go through the backend's two functions only
+    tree = ast.parse(FILELOCK_SRC.read_text(encoding="utf-8"))
+    (cls,) = [
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "FileLock"
+    ]
+    body = ast.unparse(cls)
+    assert "msvcrt" not in body and "fcntl" not in body
+    assert "_try_lock(" in body and "_unlock(turn)" in body and "_unlock(fd)" in body
+    # the kept reader: Windows opens it with delete sharing, Linux with a plain os.open
+    win_e, linux_e = _platform_branches(EVENTLOG_SRC)
+    assert "_winapi.CreateFile" in win_e and "_SHARE_ALL = 1 | 2 | 4" in win_e
+    assert "os.open(path, os.O_RDONLY)" in linux_e and "_winapi" not in linux_e
+    module = ast.parse(EVENTLOG_SRC.read_text(encoding="utf-8"))
+    top_imports = [
+        alias.name
+        for n in module.body
+        if isinstance(n, (ast.Import, ast.ImportFrom))
+        for alias in n.names
+    ]
+    assert "_winapi" not in top_imports and "msvcrt" not in top_imports
+
+
+class _FakeFcntl(types.ModuleType):
+    """`fcntl.flock` semantics in one process: one holder per file, `LOCK_NB` raises `BlockingIOError`."""
+
+    LOCK_EX, LOCK_NB, LOCK_UN = 2, 4, 8
+
+    def __init__(self) -> None:
+        super().__init__("fcntl")
+        self.ops: list[int] = []
+        self.owner: dict[tuple[int, int], int] = {}
+        self.mutex = threading.Lock()
+
+    def flock(self, fd: int, op: int) -> None:
+        st = os.fstat(fd)
+        key = (st.st_dev, st.st_ino)
+        with self.mutex:
+            self.ops.append(op)
+            if op == self.LOCK_EX | self.LOCK_NB:
+                if self.owner.get(key, fd) != fd:
+                    raise BlockingIOError
+                self.owner[key] = fd
+            elif op == self.LOCK_UN:
+                assert self.owner.pop(key) == fd, "unlocked by a handle not holding it"
+            else:
+                raise AssertionError(f"unexpected flock op {op}")
+
+
+def test_reopen_linux_branch_runs_with_flock_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The module's Linux branch, executed here against a stand-in `fcntl`: threads contend through the lock and
+    the turn lock; only `LOCK_EX | LOCK_NB` and `LOCK_UN` are used, nothing is left held, and no update is lost."""
+    fake = _FakeFcntl()
+    spec = importlib.util.spec_from_file_location("_filelock_linux", FILELOCK_SRC)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    with monkeypatch.context() as patched:  # only while the module is imported
+        patched.setattr(sys, "platform", "linux")
+        patched.setitem(sys.modules, "fcntl", fake)
+        spec.loader.exec_module(module)
+    assert module.LOCK_BACKEND == "fcntl" and module.fcntl is fake
+    linux_lock = module.FileLock
+    lock = tmp_path / "locks" / "R1.events.lock"
+    state = {"n": 0, "inside": 0, "bad": 0, "timeouts": 0}
+
+    def work(t: int) -> None:
+        for _ in range(40):
+            try:
+                with linux_lock(lock, timeout=0.003 if t == 0 else 30.0):
+                    state["inside"] += 1
+                    if state["inside"] != 1:
+                        state["bad"] += 1
+                    n = state["n"]
+                    time.sleep(0.0002)
+                    state["n"] = n + 1
+                    state["inside"] -= 1
+            except module.LockTimeout:
+                state["timeouts"] += 1
+
+    threads = [threading.Thread(target=work, args=(t,)) for t in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert state["bad"] == 0
+    assert state["n"] + state["timeouts"] == 6 * 40
+    assert set(fake.ops) == {fake.LOCK_EX | fake.LOCK_NB, fake.LOCK_UN}
+    assert fake.owner == {}, "a lock or turn lock was left held"
+    assert (lock.parent / "R1.events.turn.lock").exists()
+
+
+def test_reopen_mypy_checks_the_linux_branch(tmp_path: Path) -> None:
+    """Windows mypy only checks the win32 branch; ask for Linux explicitly (strict, from pyproject.toml)."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mypy",
+            "--platform",
+            "linux",
+            "--cache-dir",
+            str(tmp_path / "mypy-cache"),
+            "src/ultron/store/_filelock.py",
+            "src/ultron/store/eventlog.py",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        timeout=300,
+    )
+    out = proc.stdout.decode(errors="replace")
+    assert proc.returncode == 0, out
+    assert "Success: no issues found" in out
