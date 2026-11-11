@@ -35,16 +35,23 @@ Edited: `pyproject.toml` (+ `pydantic` dependency; ₹0), `uv.lock` (regenerated
 - Windows path detection should use `sys.platform`, injectable for tests so the Linux defaults are tested on Windows.
 - Strict mypy with pydantic: use the pydantic mypy plugin only if needed.
 
-## Proof
+## Rerun (tasks.md revision: verify_with per criterion, mcp none)
+The existing code is kept. The revised criteria name test files, so the change is tests plus one wording check:
+- New `tests/config/test_defaults.py` (AC1): one assertion per spec default (§8, §10.1, §11.4, §9.1), split out of `test_config.py`.
+- Existing `tests/config/test_config.py` stays for AC2-AC7; AC5 test additionally asserts the suggested-path text, AC7 keeps the field scan and `jira.api_token` rejection. Each is checked and extended only if a gap shows.
+- No `src/` change expected; if a default is found missing, add it in `defaults.py`/`models.py`.
+- MCP: none (plain Python; `make test`/`make lint` are the proof).
+
+## Proof (verify_with: `pytest`)
 | AC | Proof |
 |---|---|
-| AC1 | `tests/config/test_defaults.py`: minimal file loads; asserts each default (§8, §10.1, §11.4, §9.1) |
-| AC2 | `tests/config/test_gates.py`: parametrised merge/deploy/rollback = auto, in file and in override; message names the gate |
-| AC3 | `tests/config/test_deploy.py`: deploy without rollback errors; rollback only loads |
-| AC4 | `test_schema.py` for 0, 11, -1 rejected, 1 and 10 accepted; `test_gates.py` for the three presets vs the §8 table |
-| AC5 | `test_paths.py`: space in work folder and home rejected, message suggests a path without spaces; Linux defaults via patched platform |
-| AC6 | `test_gates.py`: intent/spec/plan/result to auto returns `ConfigWarning` objects; defaults give none |
-| AC7 | `test_schema.py`: no field named like token/password/secret in the schema (walk `model_fields`); `jira.api_token` rejected |
+| AC1 | `tests/config/test_defaults.py`: minimal file loads; one assertion per default |
+| AC2 | `tests/config/`: each locked gate = auto in a file and in an override; message names the gate |
+| AC3 | `tests/config/`: deploy without rollback errors; rollback only loads |
+| AC4 | `tests/config/`: 0, 11, -1 rejected, 1 and 10 accepted; each preset's gate table vs §8 |
+| AC5 | `tests/config/`: space in work folder and home rejected; error text includes the suggested path |
+| AC6 | `tests/config/`: a `ConfigWarning` for each default-human gate set to auto; none for defaults |
+| AC7 | `tests/config/`: no credential-like field in the schema; `jira.api_token` rejected |
 | All | `make build`, `make lint`, `make test` end in their success lines |
 
 ## Rung
