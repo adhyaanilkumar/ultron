@@ -127,7 +127,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R3 | First implementation; AC6 intent finished after D28 | Failed (4 tests): `config_change` could make merge/deploy/rollback read as auto; escalation-gate decision accepted for a task not failed/rejected |
 | 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected/call_for_edit/escalated tasks, judged by current state | Failed (10 tests): a non-string mode value in the log crashes `settings()` (unhashable type) |
-| 3 | R5 | Type-check every mode value before comparing; non-strings read as human (snapshot) or are skipped (change); D30: refuse a second escalation decision | In progress |
+| 3 | R5 | Type checks on every log value and caller argument; D30: refuse a second escalation decision per visit to the gate | Developer green (4354 passed, all 696 of test_t10.py); in testing |
 | 2026-11-11 | attempt | T28 attempt 1 (R1) | engine | fail | 4 failed, 3143 passed: prune crashes against an open reader on Windows; append after a torn tail loses a row; a new attempt shows the old attempt's activity; </untrusted-data> in content closes the wrapper; climb to R2 |
 
 ### T28 · Activity stream and monitor
@@ -150,3 +150,8 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | merge | v0/T08 (D29) into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | attempt | T10 attempt 2 (R4) | engine | fail | 10 failed, 3964 passed: a list/object where a gate mode should be crashes settings with TypeError (fails closed); climb to R5 for attempt 3 (last) |
 | 2026-11-11 | spec | D30 escalation gate: one decision | adhyaanilkumar | approve | repeat escalation decisions refused once passed; maintain gate left to T33 |
+
+### T05 · Event log (reopen)
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| Reopen (owner, not counted) | R4 | Root cause: antivirus scan on every read-open inside the lock, plus the releaser re-taking the polling lock. One kept read handle per EventLog opened outside the lock; a "turn" lock so the releaser can't barge; jittered polling | Developer: flaky test 30/30 unloaded (max 0.76 s) and under load (max 9.5 s); in testing |
