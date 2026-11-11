@@ -1,6 +1,6 @@
 # T35 plan: terminal look (mascot, wordmark, palette)
 
-Rung: R0 (total 2). Files 1 (5 files, see below), Change type 0 (new; one small edit to `cli.py`), Risk 0 (cosmetic),
+Rung: R1 (rerun after the tasks.md revision; the original score was R0, total 2). Files 1 (5 files, see below), Change type 0 (new; one small edit to `cli.py`), Risk 0 (cosmetic),
 Ambiguity 0 (cell map and colours are given), Algorithmic 1 (pairing rows into half-blocks), Test surface 0.
 If the reviewer scores the `cli.py` edit as "edits existing", the total is 3 and the rung becomes R1. I'd accept that.
 
@@ -26,7 +26,41 @@ Not touched: gate and runner call sites (T38, T46 use this API later).
 - `unicode_ok(stream) -> bool`: tries to encode every glyph used (`▀ ▄ ✔ ⏳ ✖ ●`) with `stream.encoding`. False on
   `UnicodeEncodeError` or a missing encoding.
 
-## Order of work
+## Rerun after the tasks.md revision (2026-11-11)
+The owner sent T35 back to decomposition. The existing code is the starting point and is kept. Attempt 1 had the colour
+bleed (a transparent cell printed a space under the previous cell's background). Attempt 2 fixed it in `render.py`
+(a reset before a blank cell, `\x1b[49m` before half-blocks with a transparent half), but tests decoded cells in
+isolation or only by hand. This rerun proves it through `pyte` (lesson L1).
+
+### Files that change
+- `tests/look/test_mascot.py` (new): the file `tasks.md` names for AC1 to AC3. Holds the `pyte` screen checks and the
+  line/cell counts.
+- `tests/look/test_terminal_render.py`: already has the `pyte` checks for AC6 and AC7; kept, tightened if a gap shows.
+- `tests/look/test_look.py`: kept (AC4 palette, wordmark, markers, hidden command).
+- `src/ultron/look/render.py`, `src/ultron/cli.py`: change only if a new test finds a defect.
+Not touched: `tests/acceptance/`, `tasks.md`, `spec.md`, `decisions.md`.
+
+### Order of work
+1. Write `tests/look/test_mascot.py` first: feed the coloured mascot through one `pyte.Screen` and compare every cell's
+   glyph, fg and bg with the map pair; a mirror check per line; counts; `NO_COLOR` and non-TTY; cp1252.
+2. Run it. If red, fix `render.py` (never the test).
+3. `make build`, `make lint`, `make test`.
+4. Owner steps (AC5, AC8) are listed, not run.
+
+### Proof per criterion
+| AC | verify_with | Proof |
+|---|---|---|
+| AC1 | `terminal-render` + `pytest` | `test_mascot.py`: one `pyte` screen, colour carried across cells and lines. For all 14x20 cells the glyph, fg and bg match the pair from map rows 2i and 2i+1 (a transparent half means the default bg). Also 14 lines of 20 cells. |
+| AC2 | `pytest` + `command` | `test_mascot.py`: `NO_COLOR=1` on a TTY stream, and a non-TTY stream: no `\x1b`. `command`: `uv run ultron look` piped, with and without `NO_COLOR`, has no ESC byte; I run this and check. |
+| AC3 | `pytest` | `test_mascot.py`: stream with `cp1252`: ASCII mascot, no exception. |
+| AC4 | `pytest` | `test_look.py::test_palette_hex` (kept). |
+| AC5 | `owner` + `screenshot-terminal` | Owner step. Not run by me. |
+| AC6 | `terminal-render` | `test_terminal_render.py`: transparent cells have default bg; mirror compare per line. |
+| AC7 | `terminal-render` | `test_terminal_render.py`: the cell after each line and the text after the output have default colours. |
+| AC8 | `owner` + `screenshot-terminal` | Owner step in a PowerShell 5.1 window. Not run by me. The code path is `force_utf8` plus the ASCII fallback; automation covers cp1252 only. |
+
+`mcp` (Claude in Chrome screenshot of a `pyte` HTML grid) is the testing agent's tool, not the developer's.
+## Original order of work (attempt 1, kept for history)
 1. Write `tests/look/test_look.py` first, with the §18 map, the hex values and the expected cell pairs copied as literals.
    Run `make test`. Expect red (ImportError).
 2. `palette.py`: constants and the code-to-colour map.
@@ -43,7 +77,7 @@ Not touched: gate and runner call sites (T38, T46 use this API later).
    Paste the success lines.
 6. [owner] AC5: `uv run ultron look` in Windows Terminal.
 
-## Proof per AC
+## Original proof per AC
 | AC | Proof |
 |---|---|
 | AC1 | `test_look.py::test_mascot_cells`: render with colour on and unicode on. Assert 14 lines of 20 cells. For each cell, decode the glyph and (fg, bg), and compare with the pair from map rows 2i and 2i+1. |
