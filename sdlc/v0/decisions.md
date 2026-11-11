@@ -33,4 +33,4 @@
 | 2026-11-11 | settings | MCP use (self-build) | adhyaanilkumar | require | agents use the MCP named in each task's mcp line from now on |
 | 2026-11-11 | result | T05 rerun | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T05 into v0-design | adhyaanilkumar | approve | |
-| 2026-11-11 | settings | Jira for testing | adhyaanilkumar | separate project | tests never use AD (adhya-work); owner creates a test project (e.g. ultron-test, key UT) with a Scrum board; AD stays for real escalations |
+| 2026-11-11 | settings | Jira for testing | adhyaanilkumar | AK (anil-ws) | tests never use AD (adhya-work); owner then chose AK (anil-ws) instead of a new project; AD stays for real escalations |
