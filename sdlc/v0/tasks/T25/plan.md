@@ -1,0 +1,95 @@
+# T25 plan: Jira Cloud client (issues, types, sprints, attachments)
+Author: developer agent (R3, attempt 1). Task: `tasks.md` §T25. Spec: §12, D5. Depends on T04 (`Config.jira`:
+`project`, `board`, `epic`).
+
+## Owner instruction during planning (2026-11-11)
+The owner said, through the engine: **don't use project AD or its board for testing, not even read-only.** A separate
+test project and board come later. So:
+- Fixtures are built from the shapes in Atlassian's public REST API docs, with placeholder keys (`TEST`, `TEST-1`,
+  board `1`, `https://example.atlassian.net`). Nothing read from AD is committed. Before the instruction arrived I had
+  read AD's issue-type list, Story field metadata, sprint values on a few issues and epic AD-378 through Rovo (read
+  only). That data is discarded: none of it is in a file, a fixture or a test.
+- Project key, board and epic come only from config (`[jira]` in `ultron.toml`) or the caller. No AD value is in the
+  code or tests.
+- Live checks (AC6, AC7) are owner steps against "the test project from `ultron.toml`".
+
+A second owner update the same day named the test project: **AK** on the same site. Rovo may read AK (read only);
+AD stays off limits. What Rovo showed for AK (2026-11-11):
+- Issue types: Subtask, Epic, Story, Bug, Task. **No Feature**, so AC1's fallback case uses AK's real list.
+- Story create fields: summary, issuetype, project, reporter (default) required; `parent`, `labels`, `description`,
+  `attachment` and a Sprint custom field are settable. Team-managed (`simplified`).
+- **No issues yet, so no epic**, and no issue is in any sprint. Rovo has no board or sprint endpoint, so AK's board
+  id and whether it has an active or future sprint can't be read through it.
+
+So the fixtures are:
+- `issuetypes_ak.json`: AK's real issue-type list (URLs rewritten to `https://example.atlassian.net`, no names,
+  emails or account ids). `issuetypes_with_feature.json` is the same list plus a Feature entry, marked derived.
+- Sprint lists and the create/attach responses: shaped from Atlassian's public REST docs, marked `source: docs`.
+- Every fixture has a `_capture` header (date, source, notes). AC8 is met only for the issue-type metadata. For the
+  sprint list it's an **owner step**: Rovo can't read AK's board.
+
+Owner steps found: create an epic in AK, put its key and AK's board id in the test `ultron.toml`, start (or plan) a
+sprint on AK's board, then run AC6/AC7.
+
+## Files that change
+- `pyproject.toml`, `uv.lock`: `httpx` becomes a runtime dependency (already in the lock through `mcp`); `respx` is
+  added to `dev`. Both free.
+- `src/ultron/jira/__init__.py`: public names.
+- `src/ultron/jira/client.py`: `JiraCredentials.from_env()`, `JiraClient` and its errors, `ENDPOINTS` (the only
+  REST endpoints the client may call), `SprintChoice`, `CreatedIssue`, `EscalationResult`.
+- `src/ultron/jira/body.py`: the §12 ticket body (`TicketBody`, `AttemptRow`), the title
+  `[ultron] R<n>/T<k> <title>`, and its Atlassian Document Format (ADF) rendering: headings, a criteria list, an
+  attempt table, and the last test output as a code block.
+- `tests/jira/__init__.py`, `tests/jira/conftest.py` (registers the `live` marker), `tests/jira/fixtures/*.json`,
+  `tests/jira/test_client.py`, `tests/jira/test_body.py`, `tests/jira/test_live.py` (owner only; skipped unless
+  `-m live` is given).
+
+## Design
+- **Credentials:** `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, read from the environment only. A missing or
+  empty one raises `JiraConfigError` naming it. The base URL must be `https://`. The token sits in a `_Secret` whose
+  `repr`/`str` is `***`; it goes only into httpx `BasicAuth`. Errors carry method, path, status and Jira's error
+  text, never headers. httpx transport errors are re-raised as `JiraUnreachable` with the type and path only, so T26
+  can queue a pending retry.
+- **Endpoints (`ENDPOINTS`):** issue-type metadata `GET /rest/api/3/issue/createmeta/{project}/issuetypes`; create
+  `POST /rest/api/3/issue`; read `GET /rest/api/3/issue/{key}`; delete `DELETE /rest/api/3/issue/{key}` (live test
+  cleanup only); attach `POST /rest/api/3/issue/{key}/attachments`; sprints `GET /rest/agile/1.0/board/{board}/sprint`;
+  move `POST /rest/agile/1.0/sprint/{id}/issue`. Every request goes through one `_request(name, ...)` that refuses a
+  name outside `ENDPOINTS`. None of them create, update, start, close or delete a sprint.
+- **Issue type:** Story, Feature or Bug. If the project has no Feature, the issue is a Story and the description opens
+  with a note saying so. A missing Story or Bug raises `JiraError` (the spec names a fallback for Feature only).
+- **Epic:** `fields.parent = {"key": epic}`.
+- **Sprint:** `state=active` first, else `state=future` (first one in board order), else backlog (no call). The
+  result's `SprintChoice.kind` is `active`, `future` or `backlog` and names the sprint. Pages are followed via
+  `isLast`.
+- **Board:** a numeric board id from config (`jira.board`); anything else raises `JiraConfigError`.
+- **`escalate(...)`:** resolve type → create → attach each file → choose sprint → move. Returns `EscalationResult`
+  (key, requested and actual type, fallback flag, sprint choice, attachment names) with `to_dict()` for T26's event.
+
+## Order of work
+1. Tests first (red): fixtures, body tests, client tests for AC1–AC5, AC8's header check.
+2. `body.py`, then `client.py` (green).
+3. `test_live.py` for the owner.
+4. `make build`, `make lint`, `make test`.
+
+## Proof per criterion (by `verify_with`)
+| AC | verify_with | Proof | Expected |
+|---|---|---|---|
+| AC1 | `pytest` + respx | `test_client.py::test_feature_falls_back_to_story`: type list without Feature; the create request's type is Story and its description has the fallback note | met |
+| AC2 | `pytest` | `test_client.py::test_sprint_choice[active/future/backlog]`, and the move call happens only for active/future | met |
+| AC3 | `pytest` | `test_client.py::test_endpoints_used`: the requests in a full `escalate` run are a subset of `ENDPOINTS`; no endpoint matches a sprint create/update/start/close/delete; the source has no `/rest/` path outside `ENDPOINTS` | met |
+| AC4 | `pytest` | `test_client.py::test_missing_env[...]` per variable; `::test_token_never_leaks` with a sentinel token: DEBUG log capture (httpx, httpcore, ultron), exception text on 401 and on a connection error, `repr` of client/credentials, and `EscalationResult.to_dict()` | met |
+| AC5 | `pytest` | `test_client.py::test_attachment_header`: `X-Atlassian-Token: no-check`, multipart `file` field | met |
+| AC6 | `live-call` · `owner` | `uv run pytest -m live tests/jira/test_live.py` with the `JIRA_*` variables set and `ULTRON_JIRA_TEST_PROJECT`, `ULTRON_JIRA_TEST_BOARD`, `ULTRON_JIRA_TEST_EPIC` naming the test project from `ultron.toml`. Creates one issue, checks it, deletes it in `finally` | owner |
+| AC7 | `screenshot-browser` · `owner` | same command with `ULTRON_JIRA_LIVE_PAUSE_SECONDS=180` and `-s`: it prints the issue URL and waits before deleting, so Claude in Chrome can screenshot the issue | owner |
+| AC8 | `live-call` · `pytest` | `test_client.py::test_fixtures_have_capture_header`. AC1's issue types are AK's real list (Rovo, read only); AC2's sprint lists are docs-shaped because Rovo can't read AK's board | partly met; sprint capture is an owner step |
+
+## Risks
+1. **Docs shapes vs. real responses.** Team-managed and company-managed projects differ (for example, the Sprint
+   field). The client uses the Agile move endpoint, not the Sprint custom field, so it doesn't need that field's id.
+   The live test is the check.
+2. **ADF.** Jira v3 needs ADF for the description; plain text or Markdown would show as raw text (AC7). Only standard
+   node types are used (heading, paragraph, bulletList, table, codeBlock). The table is the riskiest; the live test
+   reads the issue back.
+3. **Lockfile.** `uv.lock` changes, so it may conflict on merge (L6); regenerate rather than hand-merge.
+4. **Token leaks through libraries.** httpx and httpcore DEBUG logs don't print header values today; the log-capture
+   test catches a regression, including the Base64 Basic form.
