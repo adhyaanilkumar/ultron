@@ -44,3 +44,21 @@ query functions it will call).
 - AC2: `test_snapshot.py`, fake running agent with 7 activities, `attempt 2/3`, last 5 shown.
 - AC3: `test_readonly.py`, sha256 of `activity.jsonl`, `state.db`, `events.jsonl` before and after every query.
 - AC4: `test_prune.py`. AC5: `test_transcript.py`.
+
+## Attempt 2 (R2)
+Attempt 1 failed at the tester with 4 real defects. Fixes, each reproduced first by a test in `tests/monitor/`:
+- A. `prune` crashed with `PermissionError` at `os.replace` while a reader had the file open (Windows). Retry the
+  replace with a bounded backoff (about 10 s, under the lock); `os.replace` is atomic, so readers see the old or the
+  new file, never a partial one. Readers' retry window is also widened. Files: `activity.py`, `test_prune.py`.
+- B. A writer that died mid-line left a torn tail and the next append glued its first row onto it. Under the lock,
+  before numbering, write a newline if the file does not end with one (the torn fragment becomes a skipped garbage
+  line, nothing new is lost). Files: `activity.py`, `test_cursor.py`.
+- C. A new attempt's agent showed the previous attempt's rows. In `snapshot`, keep only rows of the agent's current
+  attempt (rows without an attempt stay), then take the rows after the newest `started`. Files: `query.py`,
+  `test_snapshot.py`.
+- D. Transcript content holding `</untrusted-data>` closed the wrapper early. Neutralise `<` of any
+  `untrusted-data` tag inside the content (case and space tolerant) as `&lt;`; wrapper, `untrusted: true` and notice
+  stay. Files: `query.py`, `test_transcript.py`.
+- Also a test that `partial` requirements are pruned like `complete` ones (`test_prune.py`).
+Risks: a longer lock hold in prune while a reader keeps the file open; bounded, then the error surfaces.
+Proof: new tests plus all of `tests/acceptance/test_t28.py`, `make build`, `make lint`, `make test`.
