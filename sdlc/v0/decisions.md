@@ -182,3 +182,5 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R3 | First implementation (`attempts.py`, `decide()`) | Developer green (6344 passed; only the known T28 test failed); in testing |
+| 2026-11-11 | result | T28 post-merge test fix | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T28 (test fix) into v0-design | adhyaanilkumar | approve | |
