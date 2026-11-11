@@ -145,7 +145,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R3 | Denylist permission policy with a quote-aware shell parser; post-call diff check inside the worktree | Failed (63 tests): many policy bypasses; usage-limit misclassified from the agent's text; interrupt over 5 s when the session hangs |
 | 2 | R4 | Deny-by-default Bash allowlist instead of a denylist; outside-worktree and `.git` checks after every call; classify from SDK error fields only; one overall 5 s interrupt budget; PowerShell removed; `repocheck` snapshot/compare after each call | Failed (22 tests): option re-parsing bypasses; deleted `.git` link skips the after-call check |
-| 3 | R5 | Per-program option allowlists (`shellrules.py`); no `@`-files or leading `-` values; trimmed paths denied; a worktree-writing `git restore` must end the call; the after-call check never skips; hooksPath/LFS/gitattributes watched | Developer green (4040 passed, all of test_t16.py); in testing |
+| 3 | R5 | Per-program option allowlists (`shellrules.py`); no `@`-files or leading `-` values; trimmed paths denied; a worktree-writing `git restore` must end the call; the after-call check never skips; hooksPath/LFS/gitattributes watched | Failed (5 tests): 4 new bypass classes (drive-relative cd, odd link names, cd into a just-made folder, hard links); option tables verified against the real parsers |
 | 2026-11-11 | attempt | T28 attempt 2 (R2) | engine | fail | 9 failed, 3202 passed: a second prune lowers activity.seq, so new rows reuse cursors a follower already passed; climb to R3 for attempt 3 (last) |
 | 2026-11-11 | result | T08 D29 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T08 (D29) into v0-design | adhyaanilkumar | approve | |
@@ -163,3 +163,4 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | merge | v0/T18 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T28 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T28 | engine | resolve | calllog.py conflict with T18: kept T28 live activity and T18 event fields; full suite green (4059 passed) before commit |
+| 2026-11-11 | attempt | T16 attempt 3 (R5, last) | engine | fail | 5 failed, 4436 passed: drive-relative cd (Windows), link names with , = : , cd into a folder made earlier in the call, in-place writes through hard links; max_attempts reached |
