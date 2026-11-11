@@ -16,3 +16,15 @@
 | 2026-11-10 | sent back | tasks (from T35 result gate) | adhyaanilkumar | rerun | rerun developer agents for T01, T02, T03, T04, T05, T06, T14, T35 from the revised tasks.md, keeping code; starts after the usage limit resets |
 | 2026-11-11 | settings | rung ladder (self-build) | adhyaanilkumar | R6 = Fable 5.2 high | self-build only; spec.md unchanged |
 | 2026-11-11 | settings | usage credits, max_parallel | adhyaanilkumar | allow; 8 | owner: usage credits are fine; run every ready task at once (the 8-task rerun) |
+| 2026-11-11 | result | T01 rerun | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T02 rerun | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T03 rerun | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T04 rerun | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T14 rerun | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T35 rerun | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T01 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T02 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T03 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T04 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T14 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T35 into v0-design | adhyaanilkumar | approve | |
