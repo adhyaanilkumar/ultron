@@ -117,3 +117,60 @@ them (the reached check reads states, not triggers). Repeated escalation decisio
 built by hand, escalation decisions refused for every non-escalating state, auto and human, nothing written;
 reached ignores a forged escalation decision), plus all of `tests/acceptance/test_t10.py`; `make build`, `make lint`,
 `make test`.
+
+## Attempt 3 (R5)
+Attempt 2 failed 10 acceptance tests (`tests/acceptance/test_t10.py`, 0bed88f), one cause. The owner also decided D30
+(one decision per escalation gate), added to this attempt. Only `gates.py` and `tests/engine/test_gates.py` change.
+
+**Cause.** `value in GATE_MODES` (snapshot modes) and `to not in GATE_MODES` (changes) hash the value, so a JSON list
+or object there raised `TypeError: unhashable type`, and `settings()`, `change_gate` and every auto decision of that
+requirement crashed instead of reading `human` / skipping the change, as attempt 2 said. The audit found the same
+class of crash in `int(max_attempts)` (missing, null, list, object, text) and in membership tests on caller values
+(`item`, `decision`, `channel`, `mode`, `task`).
+
+**Fix: every value is type-checked before it is compared or converted** (all reads of the log and of callers):
+- Snapshot: `gates` must be an object, and an entry counts only if its key names a gate and its value is the string
+  `human` or `auto`; any other value (list, object, number, bool, null, other text) reads `human`. Locked gates stay
+  `human`. `max_attempts` counts only if it is a positive integer (T05's builder rule); anything else (missing, null,
+  bool, float, text, list, object, 0 or less) reads as the default, 3.
+- Change: counts only if the actor is a human identity, `gate` names a changeable gate, `to` is the string `human` or
+  `auto`, `reached` is a bool and `reached_tasks` a list of task ids (non-empty strings). Anything else, null
+  included, is a change `change_gate` could not have written, so it is skipped. An absent `reached` or
+  `reached_tasks` still reads as nothing reached. Extra fields are ignored.
+- `GateSettings.mode` (also when built by hand): a mode or `to` that is not the string `human` or `auto` reads
+  `human`, whatever its type; a change whose `reached` is not a bool or `reached_tasks` not a tuple of strings is
+  skipped.
+- `feedback`: a `changes` decision whose comment is not a string gives `""` (changes were asked; no readable comment).
+  `gate_reached`, `feedback` and `render_decisions` only compare log values with `==`, never hash them.
+- Callers: `decide` raises `GateError` for a gate, item, decision, channel or version that is not a string, and auto
+  needs `checks_passed` to be exactly `True`; `change_gate` likewise for gate and mode; `gate_reached` on the
+  escalation gate is `False` for a task that is not a string.
+So no event T05 accepts can crash `settings()`. A log T08 cannot fold (e.g. a decision whose gate is a list) still
+makes `decide` and `change_gate` raise `IllegalTransition` and write nothing (unchanged, fails closed).
+
+**D30 (owner, 2026-11-11).** Once a task's escalation gate is decided, `decide` refuses any further escalation
+decision on it (auto or human, same or another decision) with `GateError` and writes nothing. Retrying the filing
+(`escalation`, `edit_requested`, `edit_done` events) is unaffected.
+- "Decided" means a decision recorded during the task's current stay at the gate that `decide` could have written:
+  a human identity on `form` or `terminal`, or `auto` approving while the gate was `auto` for that task; with a string
+  decision and comment and no version. One recorded before the task reached the gate (attempt 2's rule), or by the
+  engine or an agent, or with another shape, never counts.
+- A stay lasts while the task is `failed`, `rejected`, `call_for_edit` or `escalated`. With T08 as on this branch a
+  task never leaves them. With D29's T08 (`v0-design`) a stop in `call_for_edit` can return the task to an unfinished
+  state; its next arrival is a new stay with a new decision, as a new draft re-opens the other gates. Its test runs
+  once D29's T08 is in this branch (skipped until then; checked against `v0-design`'s T08 in a scratch copy).
+- A human `changes` decision on the escalation gate is still taken (its meaning is the owner's open question) and is
+  the gate's one decision.
+
+**Out of scope (owner decisions pending; unchanged):** the `maintain` gate's reach and repeat rules (T33), `changes`
+on gates with no changes loop.
+
+**Risks.** D30 folds a prefix of the log at each of the task's events during a stay (task events x log length); fine
+at V0 sizes and only on an escalation decision. A malformed `max_attempts` reads as 3 silently (T10 has no logger).
+
+**Proof** (`tests/engine/test_gates.py`, failing first): each type that is not a string, bool or count (list, object,
+number, bool, null) at every field settings read (each snapshot mode, `gates`, `max_attempts`, a change's `gate`,
+`to`, `reached`, `reached_tasks`) leaves `settings()`, `change_gate` and auto decisions working; decision events with
+odd fields; callers' values of the wrong type raise `GateError`; D30 for every pair of decisions in every reached
+state (log byte-identical), per task, forged decisions not counting, filing retries unaffected. Plus all of
+`tests/acceptance/test_t10.py`; `make build`, `make lint`, `make test`.
