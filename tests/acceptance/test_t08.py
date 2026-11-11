@@ -12,6 +12,10 @@ Each criterion has a `verify_with` of `pytest`:
 - AC6 `test_ac6_*` (D27, rerun R3): call_for_edit in the tables, both paths to escalated, never an attempt, blocking
   and settling before and after filing, replay of round trips after settling, outcome independent of the question.
 - D28 `test_d28_*` (rerun R3): Request changes at the intent gate loops back to intake_drafting (§3).
+- AC7 `test_ac7_*` (D29, reopened R3): call_for_edit edge cases. A stop returns the task to where it came from, the
+  attachment check from every escalating state, a second round and no third, filing noting the missing file at the
+  cap or after the second round; attempts never change, blocking and settling through every path, replay at every
+  prefix (also through the real event log). The D29 pairs D27 left spec silent are pinned in the AC1 tables.
 No criterion has a `ci` half; CI only reruns these on Windows and Linux.
 """
 
@@ -250,24 +254,23 @@ LEGAL_TASK[(T.REJECTED, "attachment_missing")] = T.CALL_FOR_EDIT
 LEGAL_TASK[(T.CALL_FOR_EDIT, "edit_done")] = T.ESCALATED
 LEGAL_TASK[(T.ESCALATED, "edit_requested")] = T.CALL_FOR_EDIT
 D27_TRIGGERS = ("attachment_missing", "edit_requested", "edit_done")
-# Where D27 leaves the spec silent, these pairs are pinned neither way:
-# - `attachment_missing` from the other escalatable states: §12 runs the check before creating *any* ticket (so a stop
-#   with then=escalate, §9.1, and the cap, FR18, too), but §3 draws the edge only from failed/rejected;
-# - a second `attachment_missing` while already in call_for_edit;
-# - `escalation` from call_for_edit: FR18 escalates every unfinished task at the cap, §12 files no ticket until the
-#   attachment is added;
-# - a stop (`agent_held`) of the developer agent working in call_for_edit: §9.1 does not mention call_for_edit.
-SPEC_SILENT_D27 = {
-    *(
-        (s, "attachment_missing")
-        for s in ESCALATE_FROM
-        if s not in (T.FAILED, T.REJECTED)
-    ),
-    (T.CALL_FOR_EDIT, "attachment_missing"),
-    (T.CALL_FOR_EDIT, "escalation"),
-    (T.CALL_FOR_EDIT, "agent_held"),
-}
-SPEC_SILENT_TASK |= SPEC_SILENT_D27
+# D29 (§1 D29, §3 "Edge cases (D29)") pins the four pairs D27 left silent:
+# (2) "Every escalation, whatever its reason (failure, rejection, stop, cap), runs the attachment check first": so
+#     `attachment_missing` is legal from every state `escalation` is legal from (ESCALATE_FROM), not only
+#     failed/rejected.
+# (4) "If a file is still missing after the edit, one more call_for_edit round runs": (call_for_edit,
+#     attachment_missing) -> call_for_edit. The round limit lives in the fold (test_ac7_*).
+# (3)+(4) "the ticket is filed without the missing file and says which is missing": the filing out of call_for_edit
+#     is its own record, `filed_with_missing` (the event type in store/events.py), -> escalated. A bare `escalation`
+#     from call_for_edit would file a ticket that does not say which file is missing, and §12 files no ticket until
+#     the file is added otherwise: (call_for_edit, escalation) stays illegal.
+# (1) "Stopping the agent in call_for_edit returns the task to the state it came from": not `held`, so
+#     (call_for_edit, agent_held) stays illegal; the stop is `edit_stopped`, resolved with `edit_from` (test_ac7_*).
+for _state in ESCALATE_FROM:
+    LEGAL_TASK[(_state, "attachment_missing")] = T.CALL_FOR_EDIT
+LEGAL_TASK[(T.CALL_FOR_EDIT, "attachment_missing")] = T.CALL_FOR_EDIT
+LEGAL_TASK[(T.CALL_FOR_EDIT, "filed_with_missing")] = T.ESCALATED
+D29_TRIGGERS = ("filed_with_missing", "edit_stopped")
 
 GATES = ("intent", "spec", "tasks", "plan", "result", "merge", "deploy", "escalation")
 DECISIONS = ("approve", "changes", "reject")
@@ -296,6 +299,7 @@ EVENT_TRIGGERS = (
     "partly_approved",
     "none_approved",
     *D27_TRIGGERS,
+    *D29_TRIGGERS,
     "call_for_edit",
     "bogus",
     "",
@@ -1920,8 +1924,6 @@ def test_a2_table_sweeps_are_unchanged_by_the_fix() -> None:
                 continue
             if (state, trigger) in LEGAL_TASK:
                 assert next_task_state(state, trigger) is LEGAL_TASK[(state, trigger)]
-            elif (state, trigger) in SPEC_SILENT_D27:
-                continue
             else:
                 # including (escalated, escalation) and (blocked, escalation): the no-op lives in the fold only
                 with pytest.raises(IllegalTransition):
@@ -2139,15 +2141,13 @@ def test_ac6_table_rows() -> None:
 
 
 def test_ac6_full_sweep_of_the_new_state_and_triggers() -> None:
-    """Every (call_for_edit, trigger) pair and every (state, D27 trigger) pair: legal ones go where the table says,
-    spec-silent ones are skipped, every other one raises."""
+    """Every (call_for_edit, trigger) pair and every (state, D27/D29 trigger) pair: legal ones go where the table
+    says, every other one raises (D29 left none of them spec silent)."""
     wrong = []
     pairs = {(T.CALL_FOR_EDIT, t) for t in UNIVERSE} | {
-        (s, t) for s in TaskState for t in D27_TRIGGERS
+        (s, t) for s in TaskState for t in (*D27_TRIGGERS, *D29_TRIGGERS)
     }
     for state, trigger in sorted(pairs, key=lambda p: (p[0].value, p[1])):
-        if (state, trigger) in SPEC_SILENT_D27:
-            continue
         want = LEGAL_TASK.get((state, trigger))
         try:
             got = next_task_state(state, trigger)
@@ -2159,7 +2159,7 @@ def test_ac6_full_sweep_of_the_new_state_and_triggers() -> None:
             wrong.append(("allowed", state.value, trigger, got.value))
     assert not wrong
     for state in RequirementState:
-        for trigger in D27_TRIGGERS:
+        for trigger in (*D27_TRIGGERS, *D29_TRIGGERS):
             with pytest.raises(IllegalTransition):
                 next_requirement_state(state, trigger)
 
@@ -2368,8 +2368,8 @@ def test_ac6_no_attempt_can_start_from_call_for_edit(filed: bool) -> None:
 def test_ac6_a_stop_in_call_for_edit_never_counts_an_attempt(
     then: str | None, filed: bool
 ) -> None:
-    """§9.1 is silent on stopping the developer agent while it works in call_for_edit, so legality is not pinned. If
-    the fold accepts the stop, it must not count an attempt or open the way to a new one (§3: not an attempt)."""
+    """D29 (1): a stop in call_for_edit returns the task to where it came from (rejected before filing, escalated
+    after), whatever `then` says; nothing counts as an attempt (§3)."""
     log = Log()
     log.to_in_progress({"T1": {"max_attempts": 3}, "T2": {}})
     log.begin("T1")
@@ -2381,12 +2381,9 @@ def test_ac6_a_stop_in_call_for_edit_never_counts_an_attempt(
         missing(log, "T1")
     data = {} if then is None else {"then": then}
     log.add("agent.stopped", task="T1", **data)
-    try:
-        status = fold(log.events).tasks["T1"]
-    except IllegalTransition:
-        return
+    status = fold(log.events).tasks["T1"]
     assert status.attempt == 1
-    assert status.state not in (T.PLANNING, T.PLAN_APPROVED, T.CODING, T.TESTING)
+    assert status.state is (T.ESCALATED if filed else T.REJECTED)
 
 
 # blocking
@@ -2702,18 +2699,37 @@ def test_ac6_pre_filing_call_for_edit_only_delays_the_outcome() -> None:
 # sweeps through fold: every task event on a task in call_for_edit
 
 
+def file_missing(
+    log: Log, name: str, reason: str = "cap", files: tuple[str, ...] = ("report.md",)
+) -> Event:
+    """D29 (3)/(4): the ticket is filed without the missing file and says which (`missing`)."""
+    return log.add("filed_with_missing", task=name, reason=reason, missing=list(files))
+
+
+def stop(log: Log, name: str, then: str | None = None) -> Event:
+    data = {} if then is None else {"then": then}
+    return log.add("agent.stopped", task=name, **data)
+
+
 ALL_TASK_EVENTS: dict[str, TaskEventFn] = {
     **TASK_EVENTS,
     "attachment_missing": lambda log, n: missing(log, n),
     "edit_requested": lambda log, n: ask(log, n),
     "edit_done": lambda log, n: edit_done(log, n),
+    "filed_with_missing(cap)": lambda log, n: file_missing(log, n, "cap"),
+    "filed_with_missing(edit_rounds)": lambda log, n: file_missing(
+        log, n, "edit_rounds"
+    ),
+    "filed_with_missing(budget)": lambda log, n: file_missing(log, n, "budget"),
+    "filed_with_missing(no reason)": lambda log, n: log.add(
+        "filed_with_missing", task=n, missing=["report.md"]
+    ),
 }
-SILENT_IN_CALL_FOR_EDIT = {
+STOP_LABELS = {
     "agent.stopped(default)",
     "agent.stopped(hold)",
     "agent.stopped(retry)",
     "agent.stopped(escalate)",
-    "attachment_missing",
 }
 
 
@@ -2721,8 +2737,10 @@ def _call_for_edit_case(case: str) -> Log:
     log = Log()
     log.to_in_progress({"A": {"max_attempts": 1}, "B": {}})
     _to_end(log, "A", "failed", 1)
-    if case == "pre-filing":
+    if case.startswith("pre-filing"):
         missing(log, "A")
+        if case == "pre-filing, round 2":
+            missing(log, "A")
     else:
         log.escalate("A", ticket="AD-1")
         if case == "filed, settled":
@@ -2736,38 +2754,63 @@ def _call_for_edit_case(case: str) -> Log:
     return log
 
 
-@pytest.mark.parametrize("case", ["pre-filing", "filed, in progress", "filed, settled"])
+def _expected_in_call_for_edit(case: str, label: str) -> TaskState | str | None:
+    """What `label` does to A in call_for_edit (D27 + D29): the state it goes to, "no-op", or None (illegal)."""
+    pre_filing = case.startswith("pre-filing")
+    if label == "edit_done":
+        return T.ESCALATED
+    if label in STOP_LABELS:  # D29 (1): back where it came from, whatever `then` says
+        return T.FAILED if pre_filing else T.ESCALATED
+    if not pre_filing:
+        # filed: a repeated ticket record is a no-op (§12); no attachment check, no second filing after filing
+        return "no-op" if label == "escalation" else None
+    if label == "attachment_missing":  # D29 (4): one more round, and only one
+        return T.CALL_FOR_EDIT if case == "pre-filing" else None
+    if label == "filed_with_missing(cap)":  # D29 (3): in any round
+        return T.ESCALATED
+    if (
+        label == "filed_with_missing(edit_rounds)"
+    ):  # D29 (4): only after the second round
+        return T.ESCALATED if case == "pre-filing, round 2" else None
+    # escalation before filing: the filing notes the missing file (filed_with_missing), D29 (3)/(4)
+    return None
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["pre-filing", "pre-filing, round 2", "filed, in progress", "filed, settled"],
+)
 def test_ac6_sweep_every_task_event_on_a_task_in_call_for_edit(case: str) -> None:
-    """Only `edit_done` leaves call_for_edit. A repeated `escalation` record of a filed task stays a no-op (§12);
-    before filing it is spec silent (FR18 vs §12), as is a stop (§9.1) and a second missing attachment."""
+    """Every task event on a task in call_for_edit, with D29 pinned: `edit_done` and the filings leave it, a stop
+    goes back to the origin, a second missing attachment is another round, a repeated `escalation` record of a filed
+    task stays a no-op (§12); everything else raises. Nothing changes the attempt count or settles differently."""
     wrong = []
     for label, add in ALL_TASK_EVENTS.items():
         if label == "attempt_finished(stopped)" and case != "filed, settled":
             continue  # a no-op for every task by design (the agent.stopped event decides)
-        if label in SILENT_IN_CALL_FOR_EDIT:
-            continue
-        if label == "escalation" and case == "pre-filing":
-            continue
+        want = _expected_in_call_for_edit(case, label)
         log = _call_for_edit_case(case)
         before = fold(log.events)
         add(log, "A")
         try:
             after = fold(log.events)
         except IllegalTransition:
-            if label in ("edit_done", "escalation"):
-                wrong.append(("refused", label))
+            if want is not None:
+                wrong.append(("refused", label, want))
             continue
-        if label == "edit_done":
-            if (
-                after.tasks["A"].state is not T.ESCALATED
-                or after.tasks["A"].attempt != 1
-            ):
-                wrong.append(("edit_done went to", after.tasks["A"]))
-        elif label == "escalation":
+        if want is None:
+            wrong.append(("allowed", label, after.tasks["A"].state))
+        elif want == "no-op":
             if after != before:
-                wrong.append(("escalation changed state", label))
+                wrong.append(("changed state", label))
         else:
-            wrong.append(("allowed", label))
+            a = after.tasks["A"]
+            if a.state is not want or a.attempt != 1:
+                wrong.append(("went to", label, a.state, a.attempt))
+            if case == "filed, settled" and after.requirement is not R.PARTIAL:
+                wrong.append(("unsettled", label, after.requirement))
+            if case == "filed, in progress" and after.requirement is not R.IN_PROGRESS:
+                wrong.append(("settled", label, after.requirement))
     assert not wrong
 
 
@@ -2817,14 +2860,630 @@ def test_ac6_sweep_every_task_event_on_an_escalated_task(settled: bool) -> None:
 def test_ac6_after_settling_d27_events_on_unfiled_tasks_are_illegal(
     outcome: str,
 ) -> None:
-    """Approved, blocked and unknown tasks have no ticket: no question, no edit, no attachment check."""
+    """Approved, blocked and unknown tasks have no ticket: no question, no edit, no attachment check, no filing."""
     _, want = _settled(outcome)
     for name in [*(n for n, s in want.items() if s is not T.ESCALATED), "NOPE"]:
-        for label in ("attachment_missing", "edit_requested", "edit_done"):
+        for label in (
+            "attachment_missing",
+            "edit_requested",
+            "edit_done",
+            "filed_with_missing(cap)",
+            "filed_with_missing(edit_rounds)",
+            *STOP_LABELS,
+        ):
             log, _ = _settled(outcome)
             ALL_TASK_EVENTS[label](log, name)
             with pytest.raises(IllegalTransition):
                 fold(log.events)
+
+
+# --- AC7 (D29): call_for_edit edge cases ------------------------------------------------------------------------
+# Spec §1 D29: "(1) Stopping the agent in call_for_edit returns the task to the state it came from; nothing counts as
+# an attempt. (2) Every escalation, whatever its reason (failure, rejection, stop, cap), runs the attachment check
+# first. (3) If the spending cap is reached during call_for_edit, the ticket is filed without the missing file and says
+# which is missing. (4) If a file is still missing after the edit, one more call_for_edit round runs; if it is still
+# missing, the ticket is filed noting it." §3 repeats it. T08 AC7 names the escalating states: failed, rejected, held,
+# any unfinished state at the cap, a stop with then=escalate. The names (`filed_with_missing` with `reason` and
+# `missing`, `edit_stopped`, EDIT_ROUNDS_MAX) are the developer's; the behaviour is pinned from the text above.
+
+TASKS_AC7: dict[str, dict[str, Any]] = {
+    "T1": {"max_attempts": 1},
+    "D": {"depends_on": ["T1"]},
+    "E": {"depends_on": ["D"]},
+    "X": {},
+}
+ORIGINS = [s.value for s in ESCALATE_FROM]
+STOP_THENS = (None, "hold", "retry", "escalate")
+
+
+def _reach(log: Log, name: str, where: str) -> None:
+    """Take a pending task (max_attempts 1) of an in-progress requirement to `where`, a state escalation leaves."""
+    if where == "pending":
+        return
+    log.add("task_started", task=name)
+    if where == "planning":
+        return
+    log.add("plan_drafted", task=name)
+    if where == "awaiting_plan":
+        return
+    log.gate("plan", "approve", task=name)
+    if where == "plan_approved":
+        return
+    log.start_attempt(name, 1)
+    if where == "coding":
+        return
+    if where == "held":
+        stop(log, name, "hold")  # held from coding
+        return
+    log.code(name)
+    if where == "testing":
+        return
+    if where == "failed":
+        log.finish(name, 1, "failed")
+        return
+    log.finish(name, 1, "passed")
+    if where == "passed":
+        return
+    log.add("result_requested", task=name)
+    if where == "awaiting_result":
+        return
+    assert where == "rejected", where
+    log.gate("result", "reject", task=name)
+
+
+def _at(where: str) -> Log:
+    log = Log()
+    log.to_in_progress(TASKS_AC7)
+    _reach(log, "T1", where)
+    snap = fold(log.events)
+    assert snap.tasks["T1"].state is T(where)
+    assert snap.requirement is R.IN_PROGRESS
+    return log
+
+
+def _raises(log: Log, step: Any) -> None:
+    """`step` on a copy of `log` is illegal; `log` itself is left alone."""
+    trial = Log()
+    trial.events = list(log.events)
+    step(trial)
+    with pytest.raises(IllegalTransition):
+        fold(trial.events)
+
+
+def test_ac7_names() -> None:
+    from ultron.engine import states as st
+    from ultron.store import events as ev
+
+    assert ev.FILED_WITH_MISSING == "filed_with_missing"
+    assert ev.FILED_REASONS == {ev.FILED_REASON_CAP, ev.FILED_REASON_EDIT_ROUNDS}
+    assert (ev.FILED_REASON_CAP, ev.FILED_REASON_EDIT_ROUNDS) == ("cap", "edit_rounds")
+    assert st.EDIT_STOPPED == "edit_stopped"
+    assert st.EDIT_ROUNDS_MAX == 2  # the first round and "one more" (D29 4)
+
+
+# the pure tables
+
+
+def test_ac7_the_check_runs_wherever_an_escalation_can_start() -> None:
+    """D29 (2): every escalation runs the attachment check first, so `attachment_missing` is legal from exactly the
+    states `escalation` is legal from (outside call_for_edit), and leads to call_for_edit."""
+    assert {s for s in TaskState if (s, "escalation") in LEGAL_TASK} == set(
+        ESCALATE_FROM
+    )
+    for state in TaskState:
+        if state is T.CALL_FOR_EDIT:
+            continue
+        escalates = (state, "escalation") in LEGAL_TASK
+        try:
+            got = next_task_state(state, "attachment_missing")
+        except IllegalTransition:
+            assert not escalates, state
+            continue
+        assert escalates, state
+        assert got is T.CALL_FOR_EDIT
+
+
+def test_ac7_table_rows_in_call_for_edit() -> None:
+    assert next_task_state(T.CALL_FOR_EDIT, "attachment_missing") is T.CALL_FOR_EDIT
+    assert next_task_state(T.CALL_FOR_EDIT, "filed_with_missing") is T.ESCALATED
+    assert next_task_state(T.CALL_FOR_EDIT, "edit_done") is T.ESCALATED
+    for trigger in ("escalation", "agent_held", "edit_requested", "edit_stopped"):
+        with pytest.raises(IllegalTransition):
+            next_task_state(T.CALL_FOR_EDIT, trigger)
+    for state in TaskState:
+        if state is not T.CALL_FOR_EDIT:
+            with pytest.raises(IllegalTransition):
+                next_task_state(state, "filed_with_missing")
+
+
+@pytest.mark.parametrize("origin", [*ESCALATE_FROM, T.ESCALATED])
+def test_ac7_edit_stopped_returns_to_the_origin(origin: TaskState) -> None:
+    """D29 (1): back to the state it came from: an escalating state before filing, `escalated` after."""
+    assert next_task_state(T.CALL_FOR_EDIT, "edit_stopped", edit_from=origin) is origin
+    for state in TaskState:
+        if state is not T.CALL_FOR_EDIT:
+            with pytest.raises(IllegalTransition):
+                next_task_state(state, "edit_stopped", edit_from=origin)
+
+
+def test_ac7_edit_stopped_needs_a_state_call_for_edit_comes_from() -> None:
+    for edit_from in (None, T.APPROVED, T.BLOCKED, T.CALL_FOR_EDIT):
+        with pytest.raises(IllegalTransition):
+            next_task_state(T.CALL_FOR_EDIT, "edit_stopped", edit_from=edit_from)
+
+
+# through fold, from every escalating state
+
+
+@pytest.mark.parametrize("where", ORIGINS)
+def test_ac7_the_check_from_every_escalating_state(where: str) -> None:
+    log = _at(where)
+    attempt = fold(log.events).tasks["T1"].attempt
+    missing(log, "T1")
+    mid = fold(log.events)
+    t1 = mid.tasks["T1"]
+    assert (t1.state, t1.edit_from, t1.edit_round, t1.attempt) == (
+        T.CALL_FOR_EDIT,
+        T(where),
+        1,
+        attempt,
+    )
+    assert mid.requirement is R.IN_PROGRESS  # no ticket yet
+    assert (mid.tasks["D"].state, mid.tasks["E"].state) == (T.PENDING, T.PENDING)
+    edit_done(log, "T1")
+    after = fold(log.events)
+    t1 = after.tasks["T1"]
+    assert (t1.state, t1.edit_from, t1.edit_round, t1.attempt) == (
+        T.ESCALATED,
+        None,
+        0,
+        attempt,
+    )
+    assert (after.tasks["D"].state, after.tasks["E"].state) == (T.BLOCKED, T.BLOCKED)
+
+
+@pytest.mark.parametrize("then", STOP_THENS)
+@pytest.mark.parametrize("rounds", [1, 2])
+@pytest.mark.parametrize("where", ORIGINS)
+def test_ac7_a_stop_returns_the_task_to_where_it_came_from(
+    where: str, rounds: int, then: str | None
+) -> None:
+    """D29 (1), from either round and whatever `then` asks: the whole snapshot is as it was before the check (state,
+    attempt, held_from, dependents, requirement); nothing counts as an attempt."""
+    log = _at(where)
+    before = fold(log.events)
+    for _ in range(rounds):
+        missing(log, "T1")
+    assert fold(log.events).tasks["T1"].edit_round == rounds
+    stop(log, "T1", then)
+    assert fold(log.events) == before
+
+
+def test_ac7_a_task_stopped_back_to_held_can_still_resume() -> None:
+    log = _at("held")  # held from coding
+    missing(log, "T1")
+    assert fold(log.events).tasks["T1"].held_from is T.CODING
+    missing(log, "T1")
+    stop(log, "T1", "retry")
+    snap = fold(log.events)
+    assert (snap.tasks["T1"].state, snap.tasks["T1"].held_from) == (T.HELD, T.CODING)
+    assert snap.tasks["T1"].attempt == 1
+    log.add("task_resumed", task="T1")
+    assert fold(log.events).tasks["T1"].state is T.CODING
+    log.code("T1")
+    log.finish("T1", 1, "passed")
+    log.result("T1", "approve")
+    assert fold(log.events).tasks["T1"].state is T.APPROVED
+
+
+def test_ac7_a_task_filed_from_held_cannot_resume() -> None:
+    log = _at("held")
+    missing(log, "T1")
+    edit_done(log, "T1")
+    assert fold(log.events).tasks["T1"].state is T.ESCALATED
+    _raises(log, lambda lg: lg.add("task_resumed", task="T1"))
+
+
+@pytest.mark.parametrize("then", ["bogus", ""])
+def test_ac7_a_stop_with_an_unknown_then_is_refused_in_call_for_edit(then: str) -> None:
+    log = _at("failed")
+    missing(log, "T1")
+    _raises(log, lambda lg: stop(lg, "T1", then))
+
+
+@pytest.mark.parametrize("where", ORIGINS)
+def test_ac7_one_more_round_and_no_third(where: str) -> None:
+    """D29 (4): still missing after the edit, one more round runs; still missing after it, the ticket is filed
+    noting it: a third round is refused."""
+    log = _at(where)
+    attempt = fold(log.events).tasks["T1"].attempt
+    missing(log, "T1")
+    missing(log, "T1")
+    t1 = fold(log.events).tasks["T1"]
+    assert (t1.state, t1.edit_from, t1.edit_round, t1.attempt) == (
+        T.CALL_FOR_EDIT,
+        T(where),
+        2,
+        attempt,
+    )
+    _raises(log, lambda lg: missing(lg, "T1"))
+    file_missing(log, "T1", "edit_rounds", ("report.md", "plan.md"))
+    snap = fold(log.events)
+    t1 = snap.tasks["T1"]
+    assert (t1.state, t1.edit_from, t1.edit_round, t1.attempt) == (
+        T.ESCALATED,
+        None,
+        0,
+        attempt,
+    )
+    assert (snap.tasks["D"].state, snap.tasks["E"].state) == (T.BLOCKED, T.BLOCKED)
+
+
+@pytest.mark.parametrize("rounds", [1, 2])
+@pytest.mark.parametrize("where", ORIGINS)
+def test_ac7_at_the_cap_the_task_is_filed_in_any_round(where: str, rounds: int) -> None:
+    """D29 (3): the cap reached during call_for_edit files the ticket noting the missing file, in either round."""
+    log = _at(where)
+    attempt = fold(log.events).tasks["T1"].attempt
+    for _ in range(rounds):
+        missing(log, "T1")
+    file_missing(log, "T1", "cap")
+    t1 = fold(log.events).tasks["T1"]
+    assert (t1.state, t1.edit_round, t1.attempt) == (T.ESCALATED, 0, attempt)
+
+
+@pytest.mark.parametrize("where", ORIGINS)
+def test_ac7_filing_for_edit_rounds_waits_for_the_second_round(where: str) -> None:
+    log = _at(where)
+    missing(log, "T1")
+    _raises(log, lambda lg: file_missing(lg, "T1", "edit_rounds"))
+
+
+@pytest.mark.parametrize("rounds", [1, 2])
+@pytest.mark.parametrize("reason", [None, "", "budget", "CAP", "rounds"])
+def test_ac7_filing_needs_a_known_reason(rounds: int, reason: str | None) -> None:
+    log = _at("rejected")
+    for _ in range(rounds):
+        missing(log, "T1")
+    if reason is None:
+        _raises(
+            log, lambda lg: lg.add("filed_with_missing", task="T1", missing=["r.md"])
+        )
+    else:
+        _raises(log, lambda lg: file_missing(lg, "T1", reason))
+
+
+@pytest.mark.parametrize("where", ORIGINS)
+def test_ac7_filing_with_missing_needs_an_open_check(where: str) -> None:
+    """Outside call_for_edit there is nothing missing to note: the filing is refused in every escalating state."""
+    log = _at(where)
+    for reason in ("cap", "edit_rounds"):
+        _raises(log, lambda lg, r=reason: file_missing(lg, "T1", r))
+
+
+@pytest.mark.parametrize("settled", [False, True])
+def test_ac7_no_round_or_filing_on_a_task_already_filed(settled: bool) -> None:
+    """The check runs before filing (§3, D27); a filed task, escalated or in call_for_edit for a question, takes no
+    other round and is not filed again."""
+    log = _at("failed")
+    log.escalate("T1", reason="failed", ticket="AD-1")
+    if settled:
+        log.approve_task("X")
+        assert fold(log.events).requirement is R.PARTIAL
+    steps = (
+        lambda lg: missing(lg, "T1"),
+        lambda lg: file_missing(lg, "T1", "cap"),
+        lambda lg: file_missing(lg, "T1", "edit_rounds"),
+    )
+    for step in steps:
+        _raises(log, step)
+    ask(log, "T1")
+    assert fold(log.events).tasks["T1"].state is T.CALL_FOR_EDIT
+    for step in steps:
+        _raises(log, step)
+
+
+@pytest.mark.parametrize("then", STOP_THENS)
+@pytest.mark.parametrize("settled", [False, True])
+def test_ac7_a_stop_during_a_question_returns_to_escalated(
+    settled: bool, then: str | None
+) -> None:
+    """D29 (1) after filing: the task came from `escalated`, so it goes back there; the requirement does not move."""
+    log = _at("rejected")
+    log.escalate("T1", reason="rejected", ticket="AD-1")
+    if settled:
+        log.approve_task("X")
+    filed = fold(log.events)
+    ask(log, "T1")
+    assert fold(log.events).requirement is filed.requirement
+    stop(log, "T1", then)
+    assert fold(log.events) == filed
+    ask(log, "T1")  # the user can ask again
+    edit_done(log, "T1")
+    assert fold(log.events) == filed
+
+
+# attempts, blocking and settling through every path
+
+OPS: dict[str, Any] = {
+    "missing": lambda log: missing(log, "T1"),
+    "done": lambda log: edit_done(log, "T1"),
+    "cap": lambda log: file_missing(log, "T1", "cap"),
+    "rounds": lambda log: file_missing(log, "T1", "edit_rounds"),
+    "stop": lambda log: stop(log, "T1", "retry"),
+    "hold": lambda log: stop(log, "T1", "hold"),
+    "escalate": lambda log: log.escalate("T1", reason="failed", ticket=None),
+}
+PATHS = {
+    "edit done": ("missing", "done"),
+    "second round, done": ("missing", "missing", "done"),
+    "cap in round 1": ("missing", "cap"),
+    "cap in round 2": ("missing", "missing", "cap"),
+    "after two rounds": ("missing", "missing", "rounds"),
+    "stopped, then filed directly": ("missing", "stop", "escalate"),
+    "stopped in round 2, checked again": (
+        "missing",
+        "missing",
+        "hold",
+        "missing",
+        "done",
+    ),
+    "stopped, checked again, cap": ("missing", "stop", "missing", "missing", "cap"),
+}
+
+
+@pytest.mark.parametrize("how", ["failed", "rejected"])
+@pytest.mark.parametrize("path", list(PATHS))
+def test_ac7_no_path_changes_the_attempt_count(path: str, how: str) -> None:
+    log = Log()
+    log.to_in_progress({"T1": {"max_attempts": 3}, "X": {}})
+    if how == "failed":
+        _to_end(log, "T1", "failed", 3)
+    else:
+        log.begin("T1")
+        log.start_attempt("T1", 1)
+        log.code("T1")
+        log.finish("T1", 1, "failed")
+        log.replan("T1")
+        log.start_attempt("T1", 2)
+        log.code("T1")
+        log.finish("T1", 2, "passed")
+        log.result("T1", "reject")
+    start = len(log.events)
+    attempt = fold(log.events).tasks["T1"].attempt
+    for op in PATHS[path]:
+        OPS[op](log)
+        status = fold(log.events).tasks["T1"]
+        if status.state is T.CALL_FOR_EDIT:
+            # no attempt can start from call_for_edit, in any round
+            _raises(log, lambda lg: lg.start_attempt("T1", attempt + 1))
+            _raises(log, lambda lg: lg.add("plan_drafted", task="T1"))
+    for k in range(start, len(log.events) + 1):
+        status = fold(log.events[:k]).tasks["T1"]
+        assert status.attempt == attempt, k
+        assert status.max_attempts == 3
+    assert fold(log.events).tasks["T1"].state is T.ESCALATED
+
+
+def _direct(how: str, outcome: str) -> Log:
+    """T1 (max 1) failed or rejected, X approved (outcome partial) or rejected and filed (outcome escalated)."""
+    log = Log()
+    log.to_in_progress(TASKS_AC7)
+    if outcome == "partial":
+        log.approve_task("X")
+    else:
+        log.begin("X")
+        _reject(log, "X")
+        log.escalate("X", reason="rejected", ticket=None)
+    _reach(log, "T1", how)
+    return log
+
+
+@pytest.mark.parametrize("outcome", ["partial", "escalated"])
+@pytest.mark.parametrize("how", ["failed", "rejected"])
+@pytest.mark.parametrize("path", list(PATHS))
+def test_ac7_blocking_and_settling_through_every_path(
+    path: str, how: str, outcome: str
+) -> None:
+    """While T1 is in call_for_edit before filing (any round) or stopped back to `how`, its dependents wait and the
+    requirement stays in progress; once it is filed (any way) they are blocked and the requirement settles. The end
+    is the same as filing directly."""
+    log = _direct(how, outcome)
+    for op in PATHS[path]:
+        OPS[op](log)
+        snap = fold(log.events)
+        t1 = snap.tasks["T1"].state
+        deps = (snap.tasks["D"].state, snap.tasks["E"].state)
+        if t1 is T.ESCALATED:
+            assert deps == (T.BLOCKED, T.BLOCKED), op
+            assert snap.requirement is R(outcome), op
+        else:
+            assert t1 in (T.CALL_FOR_EDIT, T(how)), op
+            assert deps == (T.PENDING, T.PENDING), op
+            assert snap.requirement is R.IN_PROGRESS, op
+            _raises(log, lambda lg: lg.add("task_started", task="D"))
+    direct = _direct(how, outcome)
+    direct.escalate("T1", reason=how, ticket=None)
+    assert fold(log.events) == fold(direct.events)
+
+
+# replay
+
+
+def _d29_log() -> Log:
+    """Every D29 path in one requirement, interleaved, settling as partial, then questions after settling.
+
+    A (max 1) fails, its check is stopped, checked again for two rounds, and filed noting two missing files.
+    B is stopped (held from coding), the check from held is stopped back to held, B resumes and is approved.
+    C is still pending at the cap: checked, filed at the cap; D (behind C) is blocked.
+    E's planning agent is stopped with then=escalate: the check runs, the stop returns E to planning; E is approved.
+    """
+    log = Log()
+    log.to_in_progress(
+        {
+            "A": {"max_attempts": 1},
+            "B": {"max_attempts": 2},
+            "C": {},
+            "D": {"depends_on": ["C"]},
+            "E": {},
+        }
+    )
+    log.begin("A")
+    log.add("task_started", task="B")
+    log.add("task_started", task="E")
+    missing(log, "E")  # a stop with then=escalate runs the check first
+    log.add("plan_drafted", task="B")
+    log.start_attempt("A", 1)
+    stop(log, "E", "escalate")  # back to planning
+    log.gate("plan", "approve", task="B")
+    log.code("A")
+    log.start_attempt("B", 1)
+    log.finish("A", 1, "failed")
+    missing(log, "A")
+    stop(log, "B", "hold")
+    stop(log, "A", "retry")  # back to failed, not an attempt
+    missing(log, "B")
+    missing(log, "A")
+    missing(log, "C")  # pending at the cap
+    stop(log, "B")  # back to held
+    missing(log, "A")  # round 2
+    log.add("task_resumed", task="B")
+    file_missing(log, "C", "cap", ("report.md",))
+    log.code("B")
+    log.add("plan_drafted", task="E")
+    log.finish("B", 1, "passed")
+    log.gate("plan", "approve", task="E")
+    file_missing(log, "A", "edit_rounds", ("report.md", "attempt-1.log"))
+    log.result("B", "approve")
+    log.start_attempt("E", 1)
+    log.code("E")
+    log.finish("E", 1, "passed")
+    log.result("E", "approve")  # settles: partial
+    ask(log, "A")
+    stop(log, "A", "escalate")  # back to escalated
+    ask(log, "C")
+    log.escalate("C", reason="cap", ticket="AD-7")  # the ticket record, a no-op
+    edit_done(log, "C")
+    return log
+
+
+D29_TYPES = {"attachment_missing", "filed_with_missing", "edit_done", "edit_requested"}
+
+
+def _check_d29_replay(events: list[Event]) -> None:
+    from ultron.store import events as ev
+
+    snaps = [fold(events[:k]) for k in range(len(events) + 1)]
+    final = snaps[-1]
+    assert final.requirement is R.PARTIAL
+    assert states(final) == {
+        "A": T.ESCALATED,
+        "B": T.APPROVED,
+        "C": T.ESCALATED,
+        "D": T.BLOCKED,
+        "E": T.APPROVED,
+    }
+    assert {n: s.attempt for n, s in final.tasks.items()} == {
+        "A": 1,
+        "B": 1,
+        "C": 0,
+        "D": 0,
+        "E": 1,
+    }
+    settled_at = next(k for k, s in enumerate(snaps) if s.requirement is R.PARTIAL)
+    assert events[settled_at - 1].type == "gate_decision"  # E's result approval
+    for k in range(len(events) + 1):
+        prefix = events[:k]
+        assert fold(prefix) == snaps[k]
+        assert fold(tuple(prefix)) == snaps[k]
+        assert fold(e for e in prefix) == snaps[k]
+        assert fold([ev.from_json(ev.to_json_line(e)) for e in prefix]) == snaps[k]
+        if k >= settled_at:
+            assert snaps[k].requirement is R.PARTIAL, k
+        if k == 0:
+            continue
+        event = events[k - 1]
+        before, after = snaps[k - 1], snaps[k]
+        stopped_in_edit = (
+            event.type == "agent.stopped"
+            and event.task in before.tasks
+            and before.tasks[event.task].state is T.CALL_FOR_EDIT
+        )
+        if event.type in D29_TYPES or stopped_in_edit:
+            # nothing in call_for_edit is an attempt
+            assert {n: s.attempt for n, s in after.tasks.items()} == {
+                n: s.attempt for n, s in before.tasks.items()
+            }, k
+        if stopped_in_edit:
+            assert event.task is not None
+            assert after.tasks[event.task].state is before.tasks[event.task].edit_from
+    assert snaps[settled_at] == final
+
+
+def test_ac7_replay_is_deterministic_at_every_prefix() -> None:
+    log = _d29_log()
+    full = list(log.events)
+    _check_d29_replay(full)
+    assert log.events == full  # folding left the events alone
+
+
+def test_ac7_replay_through_the_real_event_log(tmp_path: Path) -> None:
+    """The same log written and read back through the real event log (T05): `reason` and `missing` are kept, and
+    every prefix folds to the same snapshot as the in-memory one."""
+    from ultron.store import events as ev
+    from ultron.store.eventlog import EventLog, events_path
+
+    source = _d29_log().events
+    elog = EventLog(events_path(tmp_path, REQ))
+    for e in source:
+        elog.append(
+            ev.NewEvent(
+                actor=e.actor,
+                type=e.type,
+                requirement=e.requirement,
+                task=e.task,
+                attempt=e.attempt,
+                data=dict(e.data),
+            )
+        )
+    events = elog.read(strict=True).events
+    assert [e.seq for e in events] == list(range(1, len(events) + 1))
+    assert [(e.type, e.task, e.attempt, e.data) for e in events] == [
+        (e.type, e.task, e.attempt, e.data) for e in source
+    ]
+    filings = [e for e in events if e.type == ev.FILED_WITH_MISSING]
+    assert [(e.task, e.data["reason"], e.data["missing"]) for e in filings] == [
+        ("C", "cap", ["report.md"]),
+        ("A", "edit_rounds", ["report.md", "attempt-1.log"]),
+    ]
+    _check_d29_replay(events)
+    reread = EventLog(events_path(tmp_path, REQ)).read(strict=True).events
+    assert reread == events
+    for k in range(len(events) + 1):
+        assert fold(events[:k]) == fold(source[:k])
+
+
+# the developer's risk: a stop back to an agent state
+
+
+@pytest.mark.parametrize("where", ["planning", "coding", "testing", "pending"])
+def test_ac7_risk_a_stop_can_return_the_task_to_an_unfinished_state(where: str) -> None:
+    """Developer risk: a check on the way from an unfinished state (a stop with then=escalate, or the cap) that is
+    stopped returns the task to that state, so the engine must escalate it again. D29 (1) settles where the task goes
+    (back where it came from); the spec is silent on what follows and on bounding the loop. Pinned here only what the
+    spec says: each return is exact, never an attempt, the requirement stays in progress, and the task can still be
+    checked and filed (escalation is legal from there)."""
+    log = _at(where)
+    before = fold(log.events)
+    for then in STOP_THENS:
+        missing(log, "T1")
+        stop(log, "T1", then)
+        assert fold(log.events) == before
+    missing(log, "T1")
+    file_missing(log, "T1", "cap")
+    snap = fold(log.events)
+    assert snap.tasks["T1"].state is T.ESCALATED
+    assert snap.tasks["T1"].attempt == before.tasks["T1"].attempt
 
 
 # --- D28: Request changes at the intent gate -------------------------------------------------------------------
