@@ -2,11 +2,16 @@
 
 AC6 asks for the lock tests to pass in CI on both Windows (msvcrt) and Linux (fcntl). A green run only proves the
 lock it exercised, so `test_lock_backend_matches_os` names it, and the last test makes sure no T05 test is skipped.
+
+Reopen (lock starvation): a writer that releases the lock and asks again straight away must not get it back while
+another writer is already waiting. A polling lock let the releaser win almost every time (barging), so one writer
+could wait for the whole run. `test_a_waiting_*` pin the order: holder, then the waiter, then the holder again.
 """
 
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -119,6 +124,128 @@ def test_context_manager_releases_on_error(tmp_path: Path) -> None:
         raise ValueError("boom")
     assert path.exists()
     with FileLock(path, timeout=0.5):
+        pass
+
+
+# --- reopen: a waiter goes before the releaser takes the lock back (no barging) ---------------------------------
+
+ROUNDS = 10
+QUEUED_S = 0.3  # time for the waiter to start waiting; it needs a few milliseconds
+
+WAITER = """
+import sys
+from pathlib import Path
+from ultron.store._filelock import FileLock
+lock, record, ready = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
+ready.touch()
+with FileLock(lock, timeout=30):
+    with record.open("a", encoding="utf-8") as f:
+        f.write("B\\n")
+"""
+
+
+def _note(record: Path, tag: str) -> None:
+    with record.open("a", encoding="utf-8") as f:
+        f.write(tag + "\n")
+
+
+def test_a_waiting_thread_goes_before_the_releaser_takes_the_lock_back(
+    tmp_path: Path,
+) -> None:
+    lock = tmp_path / "x.lock"
+    for n in range(ROUNDS):
+        order: list[str] = []
+        holder = FileLock(lock)
+        holder.acquire()
+        order.append("A1")
+        started = threading.Event()
+
+        def wait_for_it(
+            order: list[str] = order, started: threading.Event = started
+        ) -> None:
+            started.set()
+            with FileLock(lock, timeout=30):
+                order.append("B")
+
+        waiter = threading.Thread(target=wait_for_it)
+        waiter.start()
+        try:
+            assert started.wait(TIMEOUT_S)
+            time.sleep(QUEUED_S)
+            holder.release()
+            with FileLock(lock, timeout=30):  # straight back, like a writer in a loop
+                order.append("A2")
+        finally:
+            holder.release()
+            waiter.join(TIMEOUT_S)
+        assert order == ["A1", "B", "A2"], f"round {n}: {order}"
+
+
+def test_a_waiting_process_goes_before_the_releaser_takes_the_lock_back(
+    tmp_path: Path,
+) -> None:
+    lock = tmp_path / "x.lock"
+    for n in range(3):
+        record, ready = tmp_path / f"order-{n}", tmp_path / f"ready-{n}"
+        holder = FileLock(lock)
+        holder.acquire()
+        _note(record, "A1")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", WAITER, str(lock), str(record), str(ready)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + TIMEOUT_S
+            while not ready.exists():
+                assert proc.poll() is None, proc.communicate()[1].decode(
+                    errors="replace"
+                )
+                assert time.monotonic() < deadline, "the waiter did not start in time"
+                time.sleep(0.005)
+            time.sleep(QUEUED_S)
+            holder.release()
+            with FileLock(lock, timeout=30):
+                _note(record, "A2")
+            _, err = proc.communicate(timeout=TIMEOUT_S)
+            assert proc.returncode == 0, err.decode(errors="replace")
+        finally:
+            holder.release()
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=TIMEOUT_S)
+        assert record.read_text(encoding="utf-8").split() == ["A1", "B", "A2"], (
+            f"round {n}"
+        )
+
+
+def test_turn_lock_sits_beside_the_lock(tmp_path: Path) -> None:
+    locks = tmp_path / ".ultron" / "locks"
+    with FileLock(locks / "R1.events.lock") as held:
+        assert held.turn_path == locks / "R1.events.turn.lock"
+    assert FileLock(tmp_path / "events.jsonl.lock").turn_path == (
+        tmp_path / "events.jsonl.turn.lock"
+    )
+    assert FileLock(tmp_path / "noext").turn_path == tmp_path / "noext.turn"
+    assert sorted(p.name for p in locks.iterdir()) == [
+        "R1.events.lock",
+        "R1.events.turn.lock",
+    ]
+
+
+def test_a_held_turn_lock_times_out_without_taking_the_lock(tmp_path: Path) -> None:
+    lock = tmp_path / "x.lock"
+    # holding `lock`'s turn lock: someone else is next in line
+    queued = FileLock(FileLock(lock).turn_path)
+    queued.acquire()
+    try:
+        with pytest.raises(LockTimeout):
+            FileLock(lock, timeout=0.2).acquire()
+    finally:
+        queued.release()
+    # nothing was left held: the lock and its turn are both free again
+    assert _try_in_child(lock, 5.0) == 0
+    with FileLock(lock, timeout=0.5):
         pass
 
 
