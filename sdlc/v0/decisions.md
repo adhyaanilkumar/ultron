@@ -164,3 +164,4 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | merge | v0/T28 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T28 | engine | resolve | calllog.py conflict with T18: kept T28 live activity and T18 event fields; full suite green (4059 passed) before commit |
 | 2026-11-11 | attempt | T16 attempt 3 (R5, last) | engine | fail | 5 failed, 4436 passed: drive-relative cd (Windows), link names with , = : , cd into a folder made earlier in the call, in-place writes through hard links; max_attempts reached |
+| 2026-11-11 | escalation | T16 → AD-438 | engine | escalate | automatic per owner; Feature under AD-378, sprint SP-105, 3 story points (4 named one-line-ish fixes plus a re-test) |

@@ -1957,7 +1957,7 @@
       },
       "total": 7,
       "rung": "R3",
-      "jira": "",
+      "jira": "AD-438",
       "mcp": {
         "servers": [],
         "reason": "`claude-agent-sdk` is a library; its in-process MCP support needs no extra server (Cat 5)"

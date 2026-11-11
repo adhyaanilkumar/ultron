@@ -560,7 +560,7 @@ Spec §11.1, §9.1 "What an ultron agent reports", FR17. The `AgentRunner.run(ro
 - type: feature
 - depends_on: T03, T15
 - ships_independently: yes
-- jira:
+- jira: AD-438 (escalated 2026-11-11: 3 attempts failed, 3 story points)
 - rung: R3 (total 7)
 - mcp: none — `claude-agent-sdk` is a library; its in-process MCP support needs no extra server (Cat 5)
 
