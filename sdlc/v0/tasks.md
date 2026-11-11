@@ -303,6 +303,8 @@ Spec §3 (states), §7.2 (ids), NFR1. Pure transition functions for requirements
   - verify_with: `pytest` — `tests/engine/test_states.py`: one case per outcome
 - AC5: New ids match `^R-\d{8}-[0-9a-f]{4}$`, use the local date, and a forced collision produces a different id.
   - verify_with: `pytest` — `tests/engine/test_ids.py`: regex, local date, forced collision
+- AC6 (added 2026-11-11): `failed` and `rejected` move to `escalated` automatically; with a missing attachment they pass through `call_for_edit` first. `escalated` → `call_for_edit` (user's question) → `escalated` is legal; `call_for_edit` is not an attempt and doesn't change the attempt count.
+  - verify_with: `pytest` — table and fold tests for every call_for_edit transition
 
 **Rubric**
 | Factor | Score | Reason |
@@ -897,12 +899,16 @@ Spec §12, D5. A small REST client (httpx) reading `JIRA_BASE_URL`, `JIRA_EMAIL`
   - verify_with: `pytest` — log-capture test with a sentinel token value
 - AC5: Attachments upload with the `X-Atlassian-Token: no-check` header.
   - verify_with: `pytest` — `tests/jira/test_client.py`: request headers asserted
-- AC6: [owner] One live call against project AD creates and then deletes a test issue under AD-378 (`uv run pytest -m live tests/jira/test_live.py`).
-  - verify_with: `live-call` — `uv run pytest -m live tests/jira/test_live.py`, one create and one delete in AD, approved first · `owner` — approves and sees the test pass
-- AC7 (added 2026-11-10): [owner] Before the AC6 test issue is deleted, it is opened in the Jira web UI: the description shows the §12 body as formatted text (headings, criteria list, attempt table), not raw markup or JSON, and its type, epic AD-378, sprint and attachment are the ones requested.
+- AC6: [owner] One live call against test project AK (anil-ws) creates and then deletes a test issue under an AK epic (`uv run pytest -m live tests/jira/test_live.py`).
+  - verify_with: `live-call` — `uv run pytest -m live tests/jira/test_live.py`, one create and one delete in AK, approved first · `owner` — approves and sees the test pass
+- AC7 (added 2026-11-10): [owner] Before the AC6 test issue is deleted, it is opened in the Jira web UI: the description shows a description of at most 280 characters as plain text, and `report.md` attached, not raw markup or JSON, and its type, the AK epic, sprint and attachment are the ones requested.
   - verify_with: `screenshot-browser` — Claude in Chrome opens the issue in the owner's logged-in Chrome and takes a screenshot · `owner` — looks at the screenshot or the page
-- AC8 (added 2026-11-10): The mocked responses in AC1–AC2 are shaped from real responses of project AD (issue-type metadata and the board's sprint list, read only), saved as fixtures with the capture date; invented payloads don't count.
+- AC8 (added 2026-11-10): The mocked responses in AC1–AC2 are shaped from real responses of test project AK (issue-type metadata and the board's sprint list, read only), saved as fixtures with the capture date; invented payloads don't count.
   - verify_with: `live-call` — read-only Jira calls, approved first · `pytest` — fixtures carry a capture-date header
+- AC9 (added 2026-11-11): The ticket description is at most 280 characters (the reason in one line and a pointer to the report); the criteria, attempt table and last test output go in an attached `report.md`.
+  - verify_with: `pytest` — length check on the built body; report.md content check
+- AC10 (added 2026-11-11): `check_attachments(paths)` reports every missing or unreadable file before any Jira call; `escalate()` refuses with a `MissingAttachments` error naming them and creates nothing. `comment(issue_key, text)` adds a comment of at most 280 characters and attaches a file to an existing issue.
+  - verify_with: `pytest` — respx asserts no create call when a file is missing; comment length check
 
 **Rubric**
 | Factor | Score | Reason |
@@ -937,6 +943,10 @@ Spec FR13, §12, §3, FR18. When a task fails `max_attempts` times, is rejected,
   - verify_with: `pytest` — `tests/engine/test_escalation.py`
 - AC6: With `jira=false` (evaluation default), no client call is made but the local board is written.
   - verify_with: `pytest` — fake client records zero calls
+- AC7 (added 2026-11-11): With an attachment missing, the task goes to `call_for_edit`, its developer agent (same rung, not an attempt, code untouched) adds the file, then the ticket is filed and the task is `escalated`.
+  - verify_with: `pytest` — engine test with the agent and Jira client faked
+- AC8 (added 2026-11-11): `ultron_call_for_edit` on an escalated task runs its developer agent with the question, attaches the answer to the ticket with a comment of at most 280 characters, and returns the task to `escalated`.
+  - verify_with: `pytest` — engine test with the agent and Jira client faked
 
 **Rubric**
 | Factor | Score | Reason |
@@ -1369,6 +1379,8 @@ Spec §6, §8, D8, FR4, FR12, FR15, FR15a, §11.2 step 4. `ultron_review(id)` op
   - verify_with: `pytest` — each form builder's schema checked against the elicitation subset
 - AC9 (added 2026-11-10): [owner] In Claude Code, the owner opens the intent, spec, result and deploy forms once each and confirms each shows the fields the description lists with readable labels (intent: request, draft and research with strikable research lines; spec: questions, version, Fable approval; deploy: version, commit, rehearsal confirmation); screenshots are saved with the test report.
   - verify_with: `owner` — opens each form in Claude Code · `screenshot-terminal` — the owner's screenshots
+- AC10 (added 2026-11-11): `ultron_call_for_edit` does nothing unless the form returns a confirmation with the question.
+  - verify_with: `mcp-client` — scripted client: declined form changes nothing
 
 **Rubric**
 | Factor | Score | Reason |

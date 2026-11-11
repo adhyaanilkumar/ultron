@@ -87,3 +87,6 @@ For every task that needs more than one attempt: what each attempt did different
 | Rerun (send-back, not counted) | R1 | Tests render through `pyte` with colour state carried across cells; Chrome screenshot check | Passed, merged |
 | 2026-11-11 | stop | T06 attempt 3, T25 attempt 2 testing | engine | rerun | Pro 5-hour usage limit hit; not counted, no climb; resumed from where they stopped |
 | 2026-11-11 | attempt | T25 attempt 2 (R4) | engine | fail | 78 failed, 992 passed: HTTP-status JiraError keeps the token reachable via __traceback__ frame local 'response' (.request.headers authorization); climb to R5 for attempt 3 (last) |
+| 2026-11-11 | spec | D27 call_for_edit and short tickets | adhyaanilkumar | approve | failed/rejected → escalated is automatic; attachments checked before filing, missing → call_for_edit (task's developer agent adds it); after filing the user can call for edit with a question; Jira text ≤280 chars unless required |
+| 2026-11-11 | tasks | tasks.md rev 2026-11-11 (D27; T25 live checks on AK) | auto | approve | T08 AC6, T25 AC9-AC10, T26 AC7-AC8, T38 AC10 added; no ids/deps/rungs changed |
+| 2026-11-11 | sent back | T08 (awaiting result), T25 attempt 3 | engine | rerun | new criteria from D27; T08 reruns at R3 from its code (not counted); T25 attempt 3 takes AC9-AC10 in the same attempt |

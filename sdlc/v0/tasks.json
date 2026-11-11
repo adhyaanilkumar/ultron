@@ -978,6 +978,18 @@
               "detail": "`tests/engine/test_ids.py`: regex, local date, forced collision"
             }
           ]
+        },
+        {
+          "id": "AC6",
+          "text": "`failed` and `rejected` move to `escalated` automatically; with a missing attachment they pass through `call_for_edit` first. `escalated` → `call_for_edit` (user's question) → `escalated` is legal; `call_for_edit` is not an attempt and doesn't change the attempt count.",
+          "needs_owner": false,
+          "added": "2026-11-11",
+          "verify_with": [
+            {
+              "method": "pytest",
+              "detail": "table and fold tests for every call_for_edit transition"
+            }
+          ]
         }
       ],
       "depends_on": [
@@ -2958,12 +2970,12 @@
         },
         {
           "id": "AC6",
-          "text": "[owner] One live call against project AD creates and then deletes a test issue under AD-378 (`uv run pytest -m live tests/jira/test_live.py`).",
+          "text": "[owner] One live call against test project AK (anil-ws) creates and then deletes a test issue under an AK epic (`uv run pytest -m live tests/jira/test_live.py`).",
           "needs_owner": true,
           "verify_with": [
             {
               "method": "live-call",
-              "detail": "`uv run pytest -m live tests/jira/test_live.py`, one create and one delete in AD, approved first"
+              "detail": "`uv run pytest -m live tests/jira/test_live.py`, one create and one delete in AK, approved first"
             },
             {
               "method": "owner",
@@ -2973,7 +2985,7 @@
         },
         {
           "id": "AC7",
-          "text": "[owner] Before the AC6 test issue is deleted, it is opened in the Jira web UI: the description shows the §12 body as formatted text (headings, criteria list, attempt table), not raw markup or JSON, and its type, epic AD-378, sprint and attachment are the ones requested.",
+          "text": "[owner] Before the AC6 test issue is deleted, it is opened in the Jira web UI: the description shows a description of at most 280 characters as plain text, and `report.md` attached, not raw markup or JSON, and its type, the AK epic, sprint and attachment are the ones requested.",
           "needs_owner": true,
           "added": "2026-11-10",
           "verify_with": [
@@ -2989,7 +3001,7 @@
         },
         {
           "id": "AC8",
-          "text": "The mocked responses in AC1–AC2 are shaped from real responses of project AD (issue-type metadata and the board's sprint list, read only), saved as fixtures with the capture date; invented payloads don't count.",
+          "text": "The mocked responses in AC1–AC2 are shaped from real responses of test project AK (issue-type metadata and the board's sprint list, read only), saved as fixtures with the capture date; invented payloads don't count.",
           "needs_owner": false,
           "added": "2026-11-10",
           "verify_with": [
@@ -3000,6 +3012,30 @@
             {
               "method": "pytest",
               "detail": "fixtures carry a capture-date header"
+            }
+          ]
+        },
+        {
+          "id": "AC9",
+          "text": "The ticket description is at most 280 characters (the reason in one line and a pointer to the report); the criteria, attempt table and last test output go in an attached `report.md`.",
+          "needs_owner": false,
+          "added": "2026-11-11",
+          "verify_with": [
+            {
+              "method": "pytest",
+              "detail": "length check on the built body; report.md content check"
+            }
+          ]
+        },
+        {
+          "id": "AC10",
+          "text": "`check_attachments(paths)` reports every missing or unreadable file before any Jira call; `escalate()` refuses with a `MissingAttachments` error naming them and creates nothing. `comment(issue_key, text)` adds a comment of at most 280 characters and attaches a file to an existing issue.",
+          "needs_owner": false,
+          "added": "2026-11-11",
+          "verify_with": [
+            {
+              "method": "pytest",
+              "detail": "respx asserts no create call when a file is missing; comment length check"
             }
           ]
         }
@@ -3120,6 +3156,30 @@
             {
               "method": "pytest",
               "detail": "fake client records zero calls"
+            }
+          ]
+        },
+        {
+          "id": "AC7",
+          "text": "With an attachment missing, the task goes to `call_for_edit`, its developer agent (same rung, not an attempt, code untouched) adds the file, then the ticket is filed and the task is `escalated`.",
+          "needs_owner": false,
+          "added": "2026-11-11",
+          "verify_with": [
+            {
+              "method": "pytest",
+              "detail": "engine test with the agent and Jira client faked"
+            }
+          ]
+        },
+        {
+          "id": "AC8",
+          "text": "`ultron_call_for_edit` on an escalated task runs its developer agent with the question, attaches the answer to the ticket with a comment of at most 280 characters, and returns the task to `escalated`.",
+          "needs_owner": false,
+          "added": "2026-11-11",
+          "verify_with": [
+            {
+              "method": "pytest",
+              "detail": "engine test with the agent and Jira client faked"
             }
           ]
         }
@@ -4662,6 +4722,18 @@
             {
               "method": "screenshot-terminal",
               "detail": "the owner's screenshots"
+            }
+          ]
+        },
+        {
+          "id": "AC10",
+          "text": "`ultron_call_for_edit` does nothing unless the form returns a confirmation with the question.",
+          "needs_owner": false,
+          "added": "2026-11-11",
+          "verify_with": [
+            {
+              "method": "mcp-client",
+              "detail": "scripted client: declined form changes nothing"
             }
           ]
         }
@@ -6218,5 +6290,12 @@
     "owner": "only the human can observe it; the detail says what they look at.",
     "live-call": "a real model or Jira call; the usage is stated and the owner approves first."
   },
-  "mcp_field": "servers: list of {name, connected}; empty list means none. reason cites a category in sdlc/v0/mcp-research.md. An MCP only helps set up or inspect; it never replaces ultron's own code or rules."
+  "mcp_field": "servers: list of {name, connected}; empty list means none. reason cites a category in sdlc/v0/mcp-research.md. An MCP only helps set up or inspect; it never replaces ultron's own code or rules.",
+  "revisions": [
+    {
+      "date": "2026-11-11",
+      "reason": "owner decisions D27 (call_for_edit, short tickets) and Jira test project AK",
+      "changes": "T08 AC6, T25 AC9-AC10, T26 AC7-AC8, T38 AC10 added; T25 AC6-AC8 moved from AD to AK; no ids, dependencies, rubric scores or rungs changed"
+    }
+  ]
 }
