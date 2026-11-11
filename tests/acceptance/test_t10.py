@@ -19,10 +19,20 @@ attacked through every input (snapshot, change event, events forged with odd cas
 non-string values, hand-built settings, presets, overrides, `change_gate`, odd spellings in `decide`); the escalation
 gate from every task state (spec §3, §12, D27) with both decision kinds, the log byte-identical on refusal; a repeat
 escalation decision; and the `maintain` gate's invariants that hold whatever T33 defines as reaching it.
+
+Attempt 3 (`test_a3_*`, after 4a92636 and the merge of D29's T08): the ten attempt-2 failures re-checked for the right
+reason (the value is type-checked where it is read: no TypeError, only that gate reads human, reading goes on); every
+field of every event type gates.py reads fuzzed with lists, objects, numbers, NaN and infinities, bools, null, very
+long and odd strings and wrong nesting, and every caller argument likewise: reads never raise, refusals are
+`GateError` (T08's `IllegalTransition` only where T08 cannot fold the log) and write nothing, locked gates stay human;
+D30: after one escalation decision every further one is refused in every reached state (D27, D29), the log
+byte-identical; filing retries are still taken; and the per-visit reading with D29's states (a task that leaves the
+gate through a stop in `call_for_edit` takes one new decision when it returns).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import subprocess
@@ -43,11 +53,12 @@ from ultron.engine.gates import (
     GateError,
     Gatekeeper,
     GateSettings,
+    feedback,
     gate_reached,
     render_decisions,
     settings_from,
 )
-from ultron.engine.states import RequirementState, TaskState, fold
+from ultron.engine.states import IllegalTransition, RequirementState, TaskState, fold
 from ultron.store import events as ev
 from ultron.store.eventlog import EventLog
 
@@ -2016,3 +2027,1132 @@ def test_a2_auto_maintain_follows_the_requirements_mode(tmp_path: Path) -> None:
             ),
         )
     assert auto_decide(default, "maintain").actor == "auto"
+
+
+# ==================================================================================================================
+# Attempt 3
+# ==================================================================================================================
+
+
+def gate_error(gk: Gatekeeper, call: Callable[[], object]) -> None:
+    """`call` raises `GateError` itself (not a TypeError, KeyError, or a fold error) and the log's bytes don't change."""
+    before = gk.log.path.read_bytes()
+    with pytest.raises(GateError):
+        call()
+    assert gk.log.path.read_bytes() == before
+
+
+def closed(gk: Gatekeeper, call: Callable[[], object]) -> None:
+    """On a log T08 cannot fold: `GateError` or T08's `IllegalTransition`, nothing else, and nothing written (plan,
+    attempt 3: "a log T08 cannot fold ... still makes decide and change_gate raise IllegalTransition")."""
+    before = gk.log.path.read_bytes()
+    with pytest.raises((GateError, IllegalTransition)):
+        call()
+    assert gk.log.path.read_bytes() == before
+
+
+def raw(
+    gk: Gatekeeper,
+    type_: str,
+    data: dict[str, Any],
+    *,
+    actor: str = HUMAN,
+    task: str | None = None,
+    extra: dict[str, Any] | None = None,
+    time: str = "2026-11-11T05:00:00Z",
+) -> None:
+    """Append one line by hand with `json.dumps`, as an editor or another writer could: NaN and infinities allowed
+    (T05's reader takes them), unknown top-level fields kept. `seq` is the next one, so a strict read takes it."""
+    line = {
+        "schema": ev.SCHEMA_VERSION,
+        "seq": len(evs(gk)) + 1,
+        "time": time,
+        "actor": actor,
+        "type": type_,
+        "requirement": REQ,
+        "task": task,
+        "attempt": None,
+        "data": data,
+        "ultron_version": "0.0.0",
+        **(extra or {}),
+    }
+    text = json.dumps(line, ensure_ascii=False, separators=(",", ":"), allow_nan=True)
+    with gk.log.path.open("ab") as fh:
+        fh.write(text.encode("utf-8") + b"\n")
+
+
+def nested(depth: int, leaf: Any = "auto") -> Any:
+    value = leaf
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+LONG = "x" * 100_000
+FUZZ_CASES: list[tuple[str, Any]] = [
+    ("null", None),
+    ("true", True),
+    ("false", False),
+    ("zero", 0),
+    ("one", 1),
+    ("minus-one", -1),
+    ("three", 3),
+    ("huge-int", 10**40),
+    ("float", 2.5),
+    ("nan", float("nan")),
+    ("inf", float("inf")),
+    ("minus-inf", float("-inf")),
+    ("empty", ""),
+    ("space", " "),
+    ("AUTO", "AUTO"),
+    ("auto-space", "auto "),
+    ("cyrillic-a-auto", "\u0430uto"),
+    ("auto-nul", "auto\x00"),
+    ("bom-auto", "\ufeffauto"),
+    ("auto-zero-width", "auto\u200b"),
+    ("long-100k", LONG),
+    ("auto-25000-times", "auto" * 25_000),
+    ("list-empty", []),
+    ("list-auto", ["auto"]),
+    ("list-list-auto", [["auto"]]),
+    ("list-human-auto", ["human", "auto"]),
+    ("object-empty", {}),
+    ("object-mode", {"mode": "auto"}),
+    ("object-auto", {"auto": "auto"}),
+    ("list-of-object", [{"plan": "auto"}]),
+    ("nested-1000", nested(1000)),
+]
+"""Values for any JSON field: none is a gate name or exactly `human`, `auto`, a decision or a channel."""
+FUZZ = [value for _, value in FUZZ_CASES]
+FUZZ_IDS = [name for name, _ in FUZZ_CASES]
+
+
+def locked_stay_human(gk: Gatekeeper) -> None:
+    settings = gk.settings()
+    for gate in LOCKED:
+        for task in (None, "T1", "T2", "T9"):
+            assert settings.mode(gate, task) == "human", (gate, task)
+        gate_error(gk, lambda g=gate: auto_decide(gk, g))
+        gate_error(gk, lambda g=gate: gk.change_gate(g, "auto", who=HUMAN))
+
+
+def reads_never_crash(gk: Gatekeeper, *, foldable: bool = True) -> None:
+    """Every read of the log returns without an exception; where T08 cannot fold the log, `gate_reached` (which
+    folds for the escalation and tasks gates) may raise T08's `IllegalTransition`, and nothing else."""
+    events = evs(gk)
+    settings = settings_from(events)
+    assert isinstance(settings.max_attempts, int)
+    assert not isinstance(settings.max_attempts, bool)
+    assert settings.max_attempts >= 1
+    for gate in GATE_NAMES:
+        for task in (None, "T1", "T9"):
+            assert settings.mode(gate, task) in ("human", "auto")
+        for item in (REQ, "T1", "T9"):
+            got = feedback(events, gate, item)
+            assert got is None or isinstance(got, str)
+        for task in (None, "T1", "T9"):
+            try:
+                assert gate_reached(events, gate, task) in (True, False)
+            except IllegalTransition:
+                assert not foldable
+    page = render_decisions(events, REQ)
+    assert render_decisions(evs(gk), REQ) == page  # the same from a fresh read
+    table = [ln for ln in page.split("\n") if ln.startswith("|")]
+    rows = table[2:]
+    assert len(rows) == len([e for e in events if e.type == ev.GATE_DECISION])
+    if table:
+        cols = table[0].count("|") - table[0].count("\\|")
+        for row in rows:
+            assert row.count("|") - row.count("\\|") == cols
+
+
+def decide_kind(gk: Gatekeeper, task: str, kind: tuple[str, str, str]) -> ev.Event:
+    who, channel, decision = kind
+    return gk.decide(
+        "escalation", task, decision, "why", who, channel, checks_passed=who == "auto"
+    )
+
+
+def escalation_rows(gk: Gatekeeper, task: str) -> list[ev.Event]:
+    return [
+        e for e in decisions(gk) if e.data["gate"] == "escalation" and e.task == task
+    ]
+
+
+_BASES: dict[str, bytes] = {}
+
+
+def from_base(
+    tmp_path: Path,
+    name: str,
+    build: Callable[[Gatekeeper], object],
+    sub: str = "copy",
+) -> Gatekeeper:
+    """This test's own copy of a setup log that `build` writes once per session (T05's builders, never decide).
+
+    Every copy has the same bytes, so hundreds of fuzz cases don't each re-run a dozen locked, fsynced appends; each
+    test still reads and writes only its own file."""
+    if name not in _BASES:
+        folder = tmp_path / "bases" / str(len(_BASES))
+        folder.mkdir(parents=True)
+        base = Gatekeeper(EventLog(folder / "events.jsonl"), REQ)
+        build(base)
+        _BASES[name] = base.log.path.read_bytes()
+    folder = tmp_path / sub
+    folder.mkdir()
+    path = folder / "events.jsonl"
+    path.write_bytes(_BASES[name])
+    return Gatekeeper(EventLog(path), REQ)
+
+
+def snapshot(gk: Gatekeeper, preset: str = "default") -> None:
+    gk.record_snapshot(build_config({**MIN, "gates": {"preset": preset}}))
+
+
+def _failed_t1(gk: Gatekeeper) -> None:
+    """Default settings (escalation auto); T1 (one attempt) failed; T9 pending."""
+    snapshot(gk)
+    in_progress(gk, {"T1": [], "T9": []}, ma=1)
+    failed_task(gk, "T1")
+
+
+def _driven(target: str, preset: str = "default") -> Callable[[Gatekeeper], object]:
+    def build(gk: Gatekeeper) -> None:
+        snapshot(gk, preset)
+        drive_any(gk, target)
+
+    return build
+
+
+# --- the attempt-2 failures (0bed88f), re-checked for the right reason -----------------------------------------------
+
+LIST_OR_OBJECT = [["auto"], {"mode": "auto"}]
+
+
+@pytest.mark.parametrize("value", LIST_OR_OBJECT, ids=["list", "object"])
+@pytest.mark.parametrize("gate", GATE_NAMES)
+def test_a3_attempt2_a_list_or_object_mode_reads_human_for_its_own_gate_only(
+    tmp_path: Path, gate: str, value: Any
+) -> None:
+    """Attempt 2 failed 8 tests on this (`test_a2_a_locked_gate_reads_human_whatever_the_snapshot_holds`,
+    `test_a2_an_odd_snapshot_mode_reads_human_for_a_changeable_gate`): `TypeError: unhashable type` from settings().
+    The right reason for passing now: the value is type-checked where it is read, so settings() reads, that gate
+    reads human, every other gate keeps the snapshot's mode, and the reads behind decide and change_gate work."""
+    gk = forged_snapshot(tmp_path, {**dict.fromkeys(GATE_NAMES, "auto"), gate: value})
+    settings = gk.settings()  # attempt 2: TypeError
+    assert settings.modes[gate] == "human"
+    for other in GATE_NAMES:
+        want = "human" if other == gate or other in LOCKED else "auto"
+        assert settings.mode(other) == want, other
+        assert settings.mode(other, "T1") == want, other
+    assert settings.max_attempts == 3
+    at_intent(gk)
+    if gate == "intent":
+        gate_error(gk, lambda: auto_decide(gk, "intent"))
+        gk.decide("intent", REQ, "approve", "", HUMAN, "form")
+    else:
+        assert auto_decide(gk, "intent").actor == "auto"
+    change = gk.change_gate("plan", "human", who=HUMAN)  # reads the settings first
+    assert change.data["from"] == ("human" if gate == "plan" else "auto")
+
+
+@pytest.mark.parametrize("value", LIST_OR_OBJECT, ids=["list", "object"])
+def test_a3_attempt2_a_list_or_object_to_is_skipped_and_later_changes_still_apply(
+    tmp_path: Path, value: Any
+) -> None:
+    """Attempt 2 failed 2 tests on this (`test_a2_a_change_change_gate_could_not_write_is_skipped[to-list|to-object]`):
+    TypeError from settings(). The right reason now: that change is skipped where it is read, reading goes on to the
+    next change, and decisions and changes that read the settings raise GateError or work, never TypeError."""
+    gk = gk_for(tmp_path, {"preset": "strict"})
+    in_progress(gk, {"T1": [], "T2": []})
+    forge(gk, CONFIG_CHANGE, _change("plan", value))
+    assert gk.settings().changes == ()  # attempt 2: TypeError
+    at_plan(gk, "T1")
+    gate_error(gk, lambda: auto_decide(gk, "plan", "T1"))
+    gk.change_gate("plan", "auto", who=HUMAN)  # attempt 2: TypeError here too
+    settings = gk.settings()
+    assert [(c.gate, c.to, c.reached_tasks) for c in settings.changes] == [
+        ("plan", "auto", ("T1",))
+    ]
+    assert settings.mode("plan", "T1") == "human"  # T1 was waiting at the gate
+    at_plan(gk, "T2")
+    assert auto_decide(gk, "plan", "T2").actor == "auto"
+
+
+# --- fuzz: every field of every event type gates.py reads ------------------------------------------------------------
+
+SNAPSHOT_FIELDS = ("every-mode", "plan-mode", "merge-mode", "gates", "max_attempts")
+
+
+def _snapshot_data(field: str, value: Any) -> dict[str, Any]:
+    every_auto = dict.fromkeys(GATE_NAMES, "auto")
+    if field == "every-mode":
+        return {"max_attempts": 3, "gates": dict.fromkeys(GATE_NAMES, value)}
+    if field == "plan-mode":
+        return {"max_attempts": 3, "gates": {**every_auto, "plan": value}}
+    if field == "merge-mode":
+        return {"max_attempts": 3, "gates": {**every_auto, "merge": value}}
+    if field == "gates":
+        return {"max_attempts": 3, "gates": value}
+    return {"max_attempts": value, "gates": every_auto}
+
+
+@pytest.mark.parametrize("value", FUZZ, ids=FUZZ_IDS)
+@pytest.mark.parametrize("field", SNAPSHOT_FIELDS)
+def test_a3_fuzz_every_config_snapshot_field(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    gk = Gatekeeper(EventLog(tmp_path / "events.jsonl"), REQ)
+    raw(gk, ev.CONFIG_SNAPSHOT, _snapshot_data(field, value), actor="engine")
+    settings = gk.settings()
+    if field in ("every-mode", "gates"):
+        changeable = dict.fromkeys(CHANGEABLE, "human")
+    elif field == "plan-mode":
+        changeable = {**dict.fromkeys(CHANGEABLE, "auto"), "plan": "human"}
+    else:
+        changeable = dict.fromkeys(CHANGEABLE, "auto")
+    for gate, want in changeable.items():
+        assert settings.mode(gate) == want, gate
+        assert settings.mode(gate, "T1") == want, gate
+    if field == "max_attempts" and type(value) is int and 1 <= value <= 10:
+        assert settings.max_attempts == value
+    elif field != "max_attempts" or type(value) is not int or value < 1:
+        assert settings.max_attempts == 3  # the default (D7) for anything else
+    locked_stay_human(gk)
+    reads_never_crash(gk)
+    gk.log.append(
+        [
+            ev.NewEvent(actor="engine", type=t, requirement=REQ)
+            for t in ("intake_started", "intent_drafted")
+        ]
+    )
+    if changeable["intent"] == "auto":  # decisions read the settings too
+        assert auto_decide(gk, "intent").actor == "auto"
+    else:
+        gate_error(gk, lambda: auto_decide(gk, "intent"))
+    assert gk.change_gate("spec", "human", who=HUMAN).data["to"] == "human"
+
+
+SNAPSHOT_SHAPES: dict[str, tuple[dict[str, Any], dict[str, Any] | None]] = {
+    "gates-as-pairs": (
+        {"max_attempts": 3, "gates": [[g, "auto"] for g in GATE_NAMES]},
+        None,
+    ),
+    "gates-inside-gates": (
+        {"max_attempts": 3, "gates": {"gates": dict.fromkeys(GATE_NAMES, "auto")}},
+        None,
+    ),
+    "settings-under-another-key": (
+        {"config": {"max_attempts": 5, "gates": dict.fromkeys(GATE_NAMES, "auto")}},
+        None,
+    ),
+    "gates-outside-data": (
+        {"max_attempts": 3},
+        {"gates": dict.fromkeys(GATE_NAMES, "auto")},
+    ),
+    "gates-as-json-text": (
+        {"max_attempts": 3, "gates": json.dumps(dict.fromkeys(GATE_NAMES, "auto"))},
+        None,
+    ),
+    "mode-inside-an-object": (
+        {"max_attempts": 3, "gates": {g: {"mode": "auto"} for g in GATE_NAMES}},
+        None,
+    ),
+    "mode-inside-a-list": (
+        {"max_attempts": 3, "gates": {g: ["auto"] for g in GATE_NAMES}},
+        None,
+    ),
+    "max-attempts-inside-a-list": (
+        {"max_attempts": [5], "gates": dict.fromkeys(GATE_NAMES, "human")},
+        None,
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", SNAPSHOT_SHAPES)
+def test_a3_a_snapshot_with_the_wrong_nesting_reads_every_gate_human(
+    tmp_path: Path, shape: str
+) -> None:
+    data, extra = SNAPSHOT_SHAPES[shape]
+    gk = Gatekeeper(EventLog(tmp_path / "events.jsonl"), REQ)
+    raw(gk, ev.CONFIG_SNAPSHOT, data, actor="engine", extra=extra)
+    settings = gk.settings()
+    assert {g: settings.mode(g, "T1") for g in GATE_NAMES} == dict.fromkeys(
+        GATE_NAMES, "human"
+    )
+    assert settings.max_attempts == 3
+    locked_stay_human(gk)
+    reads_never_crash(gk)
+
+
+def test_a3_duplicate_keys_in_a_hand_edited_line_never_make_a_locked_gate_auto(
+    tmp_path: Path,
+) -> None:
+    """JSON keeps the last of two equal keys. A hand edit that writes `"merge":"human","merge":"auto"` gets `auto`
+    into the snapshot and into a change; locked gates read human anyway, and a changeable gate takes the value."""
+    gk = Gatekeeper(EventLog(tmp_path / "events.jsonl"), REQ)
+    head = '{"schema":1,"seq":%d,"time":"2026-11-11T05:00:00Z","actor":"%s","type":"%s","requirement":"%s",'
+    tail = '"task":null,"attempt":null,"ultron_version":"0.0.0"}\n'
+    snapshot_line = (
+        head % (1, "engine", ev.CONFIG_SNAPSHOT, REQ)
+        + '"data":{"max_attempts":3,"gates":{"merge":"human","merge":"auto","deploy":"human","deploy":"auto",'
+        + '"rollback":"auto","plan":"human","plan":"auto"}},'
+        + tail
+    )
+    change_line = (
+        head % (2, HUMAN, CONFIG_CHANGE, REQ)
+        + '"data":{"gate":"plan","gate":"merge","to":"human","to":"auto","reached":false,"reached_tasks":[]},'
+        + tail
+    )
+    gk.log.path.write_bytes((snapshot_line + change_line).encode("utf-8"))
+    events = evs(gk)
+    assert events[0].data["gates"]["merge"] == "auto"  # the reader kept the last key
+    assert events[1].data["gate"] == "merge"
+    settings = gk.settings()
+    assert settings.mode("plan") == "auto"  # control: the duplicate key did take effect
+    assert settings.changes == ()
+    locked_stay_human(gk)
+    complete(gk)
+    for gate in LOCKED:
+        gate_error(gk, lambda g=gate: auto_decide(gk, g))
+        assert gk.decide(gate, REQ, "approve", "", HUMAN, "form").actor == HUMAN
+
+
+CHANGE_FIELDS = ("gate", "to", "reached", "reached_tasks", "from", "warning")
+
+
+def _change_counts(field: str, value: Any) -> bool:
+    """Whether a change with `value` in `field` is one `change_gate` could have written (plan, attempt 3): `reached`
+    a bool, `reached_tasks` a list of task ids; `from` and `warning` are never read. No fuzz value names a gate or is
+    exactly `human` or `auto`, so a fuzzed `gate` or `to` never counts."""
+    if field in ("from", "warning"):
+        return True
+    if field == "reached":
+        return isinstance(value, bool)
+    if field == "reached_tasks":
+        return isinstance(value, list) and all(isinstance(t, str) and t for t in value)
+    return False
+
+
+def _t2_at_plan_strict(gk: Gatekeeper) -> None:
+    snapshot(gk, "strict")  # every changeable gate human
+    in_progress(gk, {"T1": [], "T2": []})
+    at_plan(gk, "T2")
+
+
+@pytest.mark.parametrize("value", FUZZ, ids=FUZZ_IDS)
+@pytest.mark.parametrize("field", CHANGE_FIELDS)
+def test_a3_fuzz_every_config_change_field(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    """A change written after T2 reached the plan gate, as the record says (`reached_tasks` does not name T2): it
+    applies to T2 when it is one `change_gate` could have written, and never counts otherwise."""
+    gk = from_base(tmp_path, "t2-at-plan-strict", _t2_at_plan_strict)
+    for gate in ("plan", *LOCKED):
+        raw(gk, CONFIG_CHANGE, {**_change(gate), field: value})
+    settings = gk.settings()
+    counts = _change_counts(field, value)
+    assert [(c.gate, c.to) for c in settings.changes] == (
+        [("plan", "auto")] if counts else []
+    )
+    want = "auto" if counts else "human"
+    assert settings.mode("plan", "T2") == want
+    locked_stay_human(gk)
+    reads_never_crash(gk)
+    if counts:
+        assert auto_decide(gk, "plan", "T2").actor == "auto"
+    else:
+        gate_error(gk, lambda: auto_decide(gk, "plan", "T2"))
+    assert gk.change_gate("result", "auto", who=HUMAN).data["to"] == "auto"
+
+
+DECISION_FIELDS = ("gate", "decision", "channel", "comments", "version")
+
+
+def _decide_shaped(field: str, value: Any) -> bool:
+    """Whether a human escalation approval with `value` in `field` is one `decide` could have written (plan,
+    attempt 3, D30). No fuzz value is exactly `escalation`, a decision or a channel."""
+    if field == "comments":
+        return isinstance(value, str)
+    if field == "version":
+        return value is None
+    return False
+
+
+@pytest.mark.parametrize("value", FUZZ, ids=FUZZ_IDS)
+@pytest.mark.parametrize("field", DECISION_FIELDS)
+def test_a3_fuzz_every_escalation_decision_field(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    """Whatever odd escalation decision is in the log: no read crashes, and the gate takes at most one more decision
+    (none if the odd one is one `decide` could have written, D30); refusals are `GateError` and write nothing."""
+    gk = from_base(tmp_path, "t1-failed", _failed_t1)  # escalation is auto
+    data = {
+        "gate": "escalation",
+        "decision": "approve",
+        "channel": "form",
+        "comments": "",
+        "version": None,
+        field: value,
+    }
+    raw(gk, ev.GATE_DECISION, data, task="T1")
+    foldable = not (field in ("gate", "decision") and not isinstance(value, str))
+    reads_never_crash(gk, foldable=foldable)
+    locked_stay_human(gk)
+    if not foldable:  # T08 needs a gate and a decision that are text
+        closed(gk, lambda: gk.decide("escalation", "T1", "approve", "", HUMAN, "form"))
+        closed(gk, lambda: auto_decide(gk, "escalation", "T1"))
+        closed(gk, lambda: gk.change_gate("escalation", "human", who=HUMAN))
+        return
+    if _decide_shaped(field, value):
+        gate_error(
+            gk, lambda: gk.decide("escalation", "T1", "approve", "", HUMAN, "form")
+        )
+    else:
+        gk.decide("escalation", "T1", "approve", "", HUMAN, "form")
+    for kind in ESCALATION_KINDS:
+        gate_error(gk, lambda k=kind: decide_kind(gk, "T1", k))
+    reads_never_crash(gk)
+
+
+@pytest.mark.parametrize("value", FUZZ, ids=FUZZ_IDS)
+@pytest.mark.parametrize("field", DECISION_FIELDS)
+def test_a3_fuzz_every_requirement_gate_decision_field(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    gk = from_base(tmp_path, "at-intent", lambda b: (snapshot(b), at_intent(b)))
+    data = {
+        "gate": "intent",
+        "decision": "changes",
+        "channel": "form",
+        "comments": "add Linux",
+        "version": None,
+        field: value,
+    }
+    raw(gk, ev.GATE_DECISION, data)
+    # T08 folds it unless the gate or decision is not text, or the intent gate cannot take that decision
+    foldable = field not in ("gate", "decision") or (
+        field == "gate" and isinstance(value, str)
+    )
+    reads_never_crash(gk, foldable=foldable)
+    locked_stay_human(gk)
+    if not foldable:
+        closed(gk, lambda: gk.decide("intent", REQ, "approve", "", HUMAN, "form"))
+        closed(gk, lambda: gk.change_gate("spec", "auto", who=HUMAN))
+        return
+    if field == "gate":
+        # not an intent decision: the gate still waits, with no comment for the agent
+        assert req_state(gk) is R.AWAITING_INTENT
+        assert gk.feedback("intent", REQ) is None
+    else:
+        assert req_state(gk) is R.INTAKE_DRAFTING
+        want = "add Linux"
+        if field == "comments":
+            want = value if isinstance(value, str) else ""
+        assert gk.feedback("intent", REQ) == want
+        put(gk, "intent_drafted")
+        assert gk.feedback("intent", REQ) is None
+    gk.decide("intent", REQ, "approve", "", HUMAN, "form")
+    assert req_state(gk) is R.SPEC_DRAFTING
+    assert gk.change_gate("spec", "auto", who=HUMAN).data["to"] == "auto"
+
+
+ODD_ACTORS = [
+    HUMAN,
+    "user:" + "y" * 100_000 + " <long@example.com>",
+    "user:a|b\\c <pipe@example.com>",
+    "user:\u202eevil <rtl@example.com>",
+    "user:auto",
+    "auto",
+    "engine",
+    "agent:developer",
+]
+
+
+@pytest.mark.parametrize(
+    "actor",
+    ODD_ACTORS,
+    ids=["human", "long", "pipe", "rtl", "user-auto", "auto", "engine", "agent"],
+)
+@pytest.mark.parametrize(
+    "time",
+    ["2026-11-11T05:00:00Z", "2026|11\n11", "t" * 50_000],
+    ids=["iso", "pipe-newline", "long"],
+)
+def test_a3_fuzz_the_actor_and_time_of_a_decision(
+    tmp_path: Path, actor: str, time: str
+) -> None:
+    """`who` and `when` as T05 accepts them (any actor string of the four kinds, any time text): decisions.md keeps
+    its columns, and the escalation gate counts the decision only if a human (or auto, while auto) could have made
+    it."""
+    gk = from_base(tmp_path, "t1-failed", _failed_t1)  # escalation auto
+    channel = "auto" if actor == "auto" else "form"
+    data = {
+        "gate": "escalation",
+        "decision": "approve",
+        "channel": channel,
+        "comments": "x",
+        "version": None,
+    }
+    raw(gk, ev.GATE_DECISION, data, actor=actor, task="T1", time=time)
+    reads_never_crash(gk)
+    if actor.startswith("user:") or actor == "auto":
+        gate_error(
+            gk, lambda: gk.decide("escalation", "T1", "approve", "", HUMAN, "form")
+        )
+    else:  # the engine or an agent never decides a gate, so it never closed this one
+        gk.decide("escalation", "T1", "approve", "", HUMAN, "form")
+    reads_never_crash(gk)
+
+
+@pytest.mark.parametrize("value", FUZZ, ids=FUZZ_IDS)
+def test_a3_fuzz_fields_gates_never_reads(tmp_path: Path, value: Any) -> None:
+    """Draft data, `config_warning`, unknown event types and unknown top-level fields are never read."""
+
+    def build(b: Gatekeeper) -> None:
+        snapshot(b, "unattended")
+        in_progress(b, {"T1": [], "T9": []})
+        put(b, "task_started", "T1")
+
+    gk = from_base(tmp_path, "t1-planning-unattended", build)
+    raw(
+        gk,
+        "plan_drafted",
+        {"plan": value, "gate": value},
+        actor="agent:developer",
+        task="T1",
+        extra={"gates": value, "decision": value},
+    )
+    raw(gk, CONFIG_WARNING, {"gate": value, "from": value, "to": value}, actor="engine")
+    raw(gk, "something_new", {"gate": value, "to": value}, actor="engine", task="T1")
+    reads_never_crash(gk)
+    locked_stay_human(gk)
+    assert auto_decide(gk, "plan", "T1").actor == "auto"
+
+
+@pytest.mark.parametrize("value", FUZZ, ids=FUZZ_IDS)
+def test_a3_fuzz_an_attempt_outcome(tmp_path: Path, value: Any) -> None:
+    """An outcome T08 cannot take leaves the log unfoldable: reads still work, writes fail closed."""
+
+    def build(b: Gatekeeper) -> None:
+        snapshot(b, "unattended")
+        in_progress(b, {"T1": [], "T9": []})
+        at_plan(b, "T1")
+        rec(b, "plan", task="T1")
+        b.log.append(ev.attempt_started(REQ, "T1", 1))
+        put(b, "coding_finished", "T1")
+
+    gk = from_base(tmp_path, "t1-testing-unattended", build)
+    raw(gk, ev.ATTEMPT_FINISHED, {"outcome": value}, actor="engine", task="T1")
+    reads_never_crash(gk, foldable=False)
+    locked_stay_human(gk)
+    closed(gk, lambda: auto_decide(gk, "result", "T1"))
+    closed(gk, lambda: gk.change_gate("result", "human", who=HUMAN))
+
+
+# --- fuzz: every caller argument ---------------------------------------------------------------------------------------
+
+CALLER_CASES: list[tuple[str, Any]] = [
+    *FUZZ_CASES,
+    ("bytes", b"approve"),
+    ("tuple", ("plan",)),
+    ("set", {"auto"}),
+    ("nested-2000", nested(2000)),
+]
+
+
+@pytest.mark.parametrize(
+    "value", [v for _, v in CALLER_CASES], ids=[n for n, _ in CALLER_CASES]
+)
+def test_a3_every_caller_argument_of_another_type_or_spelling_is_a_gate_error(
+    tmp_path: Path, value: Any
+) -> None:
+    """decide, request_changes, change_gate, feedback, gate_reached, `GateSettings.mode` and render_decisions,
+    every argument: a value no caller should pass is a `GateError` that writes nothing, or (for reads of an item) an
+    answer; any text is a valid comment."""
+
+    def build(b: Gatekeeper) -> None:
+        snapshot(b, "unattended")
+        in_progress(b, {"T1": [], "T9": []})
+        at_plan(b, "T1")
+
+    gk = from_base(tmp_path, "t1-at-plan-unattended", build)
+    base = gk.log.path.read_bytes()
+    is_text = isinstance(value, str)
+    for start in (
+        ["plan", "T1", "approve", "", HUMAN, "form"],
+        ["plan", "T1", "approve", "", "auto", "auto"],
+    ):
+        for pos in range(6):
+            args = list(start)
+            args[pos] = value
+            if pos == 3 and is_text:  # any text is a comment
+                event = gk.decide(*args, checks_passed=True)
+                assert event.data["comments"] == value
+                gk.log.path.write_bytes(base)  # back to the waiting plan gate
+                continue
+            gate_error(gk, lambda a=args: gk.decide(*a, checks_passed=True))
+    if value is not True:
+        gate_error(
+            gk,
+            lambda: gk.decide(
+                "plan", "T1", "approve", "", "auto", "auto", checks_passed=value
+            ),
+        )
+    if value is not None:
+        gate_error(
+            gk, lambda: gk.decide("plan", "T1", "approve", "", HUMAN, "form", value)
+        )
+    gate_error(gk, lambda: gk.decide("spec", REQ, "approve", "", HUMAN, "form", value))
+    for gate in ("intent", "result", "escalation", "merge"):
+        gate_error(gk, lambda g=gate: gk.decide(g, value, "approve", "", HUMAN, "form"))
+    for pos in range(5):
+        args = ["plan", "T1", "redo", HUMAN, "form"]
+        args[pos] = value
+        if pos == 2 and is_text and value.strip():
+            assert gk.request_changes(*args) is T.PLANNING
+            assert gk.feedback("plan", "T1") == value
+            gk.log.path.write_bytes(base)
+            continue
+        gate_error(gk, lambda a=args: gk.request_changes(*a))
+    gate_error(gk, lambda: gk.change_gate(value, "auto", who=HUMAN))
+    gate_error(gk, lambda: gk.change_gate("result", value, who=HUMAN))
+    gate_error(gk, lambda: gk.change_gate("result", "auto", who=value))
+    events = evs(gk)
+    settings = gk.settings()
+    with pytest.raises(GateError):
+        gk.feedback(value, "T1")
+    with pytest.raises(GateError):
+        gate_reached(events, value, "T1")
+    with pytest.raises(GateError):
+        settings.mode(value)
+    for gate, info in GATES.items():
+        assert gk.feedback(gate, value) is None
+        if info.level == "task":
+            assert gate_reached(events, gate, value) is False
+        else:  # the item is not read for a requirement gate
+            assert gate_reached(events, gate, value) == gate_reached(events, gate)
+        assert settings.mode(gate, value) == settings.mode(gate)
+    page = render_decisions(events, value)
+    assert page.startswith("# Decisions: ")
+    assert _rows(page) == []
+    assert gk.log.path.read_bytes() == base
+
+
+@pytest.mark.parametrize("where", ["comment", "who"])
+def test_a3_a_lone_surrogate_in_text_is_refused_and_writes_nothing(
+    tmp_path: Path, where: str
+) -> None:
+    """Outside the brief's fuzz classes, recorded for the report: text with a lone surrogate (a non-UTF-8 byte in a
+    terminal argument decodes to one) cannot be written as UTF-8, so `decide` raises T05's `InvalidEventError` (a
+    ValueError, not GateError) and writes nothing."""
+    gk = gk_for(tmp_path)
+    in_progress(gk, {"T1": []})
+    at_plan(gk, "T1")
+    comment, who = (
+        ("\udcff", HUMAN) if where == "comment" else ("", "user:\udcff <x@example.com>")
+    )
+    refused(gk, lambda: gk.decide("plan", "T1", "approve", comment, who, "form"))
+    assert gk.decide("plan", "T1", "approve", "", HUMAN, "form").actor == HUMAN
+
+
+# --- D30: one decision per escalation gate (spec §1, 2026-11-11), with D29's states --------------------------------
+
+D29_REACHED = (
+    "call_for_edit_at_the_cap_from_pending",
+    "call_for_edit_at_the_cap_from_coding",
+    "call_for_edit_at_the_cap_from_held",
+    "call_for_edit_second_round",
+    "escalated_filed_with_missing_at_the_cap",
+    "escalated_filed_with_missing_after_two_rounds",
+    "failed_after_an_edit_stop",
+    "rejected_after_an_edit_stop",
+    "escalated_after_an_edit_stop_after_filing",
+)
+ALL_REACHED = (*REACHED, *D29_REACHED)
+KIND_IDS = [
+    "auto-approve",
+    "human-approve-form",
+    "human-approve-terminal",
+    "human-reject",
+    "human-changes",
+]
+
+
+def drive_any(gk: Gatekeeper, target: str) -> tuple[str, TaskState]:
+    """`drive`, plus the states D29 adds on the way to filing (T08 as merged from v0-design)."""
+    if target not in D29_REACHED:
+        return drive(gk, target)
+    missing: dict[str, Any] = {"missing": ["report.md"]}
+    if target.startswith("call_for_edit_at_the_cap_from_"):
+        task, _ = drive(gk, target.removeprefix("call_for_edit_at_the_cap_from_"))
+        put(
+            gk, ev.ATTACHMENT_MISSING, task, **missing
+        )  # D29 (2): every escalation checks first
+        return task, T.CALL_FOR_EDIT
+    if target == "call_for_edit_second_round":
+        task, _ = drive(gk, "call_for_edit_before_filing_failed")
+        put(gk, ev.ATTACHMENT_MISSING, task, **missing)  # D29 (4)
+        return task, T.CALL_FOR_EDIT
+    if target == "escalated_filed_with_missing_at_the_cap":
+        task, _ = drive(gk, "call_for_edit_before_filing_rejected")
+        put(gk, ev.FILED_WITH_MISSING, task, reason="cap", **missing)  # D29 (3)
+        return task, T.ESCALATED
+    if target == "escalated_filed_with_missing_after_two_rounds":
+        task, _ = drive_any(gk, "call_for_edit_second_round")
+        put(gk, ev.FILED_WITH_MISSING, task, reason="edit_rounds", **missing)  # D29 (4)
+        return task, T.ESCALATED
+    origin, back = {
+        "failed_after_an_edit_stop": ("call_for_edit_before_filing_failed", T.FAILED),
+        "rejected_after_an_edit_stop": (
+            "call_for_edit_before_filing_rejected",
+            T.REJECTED,
+        ),
+        "escalated_after_an_edit_stop_after_filing": (
+            "call_for_edit_after_filing",
+            T.ESCALATED,
+        ),
+    }[target]
+    task, _ = drive(gk, origin)
+    put(gk, "agent.stopped", task, then="hold")  # D29 (1): back to where it came from
+    return task, back
+
+
+def test_a3_drive_any_reaches_every_d29_state(tmp_path: Path) -> None:
+    for i, target in enumerate(D29_REACHED):
+        gk = gk_for(tmp_path, sub=f"d{i}")
+        task, state = drive_any(gk, target)
+        assert task_state(gk, task) is state, target
+        assert gate_reached(evs(gk), "escalation", task), target
+
+
+@pytest.mark.parametrize("first", range(len(ESCALATION_KINDS)), ids=KIND_IDS)
+@pytest.mark.parametrize("target", ALL_REACHED)
+def test_a3_d30_after_one_escalation_decision_every_further_one_is_refused(
+    tmp_path: Path, target: str, first: int
+) -> None:
+    """D30 in every state at the escalation gate (failed, rejected, call_for_edit before and after filing, escalated
+    by every route, D29's rounds and stops): the first decision of each kind is taken (so each kind is takeable
+    here), then every kind is refused with GateError (same, contradictory, auto after human, human after auto), the
+    log byte-identical, the state and decisions.md unchanged, also for a fresh reader of the same file."""
+    gk = from_base(tmp_path, f"drive:{target}", _driven(target))  # escalation auto
+    task = "T1"
+    assert task_state(gk, task) in (T.FAILED, T.REJECTED, T.CALL_FOR_EDIT, T.ESCALATED)
+    decide_kind(gk, task, ESCALATION_KINDS[first])
+    settled = fold(evs(gk))
+    page = render_decisions(evs(gk), REQ)
+    for kind in ESCALATION_KINDS:
+        gate_error(gk, lambda k=kind: decide_kind(gk, task, k))
+    gate_error(
+        gk, lambda: gk.request_changes("escalation", task, "more", HUMAN, "form")
+    )
+    assert fold(evs(gk)) == settled
+    assert render_decisions(evs(gk), REQ) == page
+    fresh = Gatekeeper(
+        EventLog(gk.log.path), REQ
+    )  # the rule lives in the log, not in memory
+    for kind in ESCALATION_KINDS:
+        gate_error(fresh, lambda k=kind: decide_kind(fresh, task, k))
+    assert len(escalation_rows(gk, task)) == 1
+
+
+NAMED_PAIRS: dict[str, tuple[tuple[str, str, str], tuple[str, str, str]]] = {
+    "same-human": ((HUMAN, "form", "approve"), (HUMAN, "form", "approve")),
+    "same-auto": (("auto", "auto", "approve"), ("auto", "auto", "approve")),
+    "contradictory": ((HUMAN, "form", "approve"), (HUMAN, "terminal", "reject")),
+    "contradictory-reversed": ((HUMAN, "form", "reject"), (HUMAN, "form", "approve")),
+    "auto-then-human": (("auto", "auto", "approve"), (HUMAN, "form", "reject")),
+    "human-then-auto": ((HUMAN, "terminal", "reject"), ("auto", "auto", "approve")),
+}
+
+
+@pytest.mark.parametrize("pair", NAMED_PAIRS)
+@pytest.mark.parametrize(
+    "target",
+    ["failed", "call_for_edit_at_the_cap_from_coding", "escalated_after_an_edit"],
+)
+def test_a3_d30_the_named_second_decisions_are_refused(
+    tmp_path: Path, target: str, pair: str
+) -> None:
+    first, second = NAMED_PAIRS[pair]
+    task = "T1"
+    alone = from_base(tmp_path, f"drive:{target}", _driven(target), sub="alone")
+    assert decide_kind(alone, task, second).data["decision"] == second[2]  # control
+    gk = from_base(tmp_path, f"drive:{target}", _driven(target), sub="pair")
+    decide_kind(gk, task, first)
+    gate_error(gk, lambda: decide_kind(gk, task, second))
+    assert [(e.actor, e.data["decision"]) for e in escalation_rows(gk, task)] == [
+        (first[0], first[2])
+    ]
+
+
+def test_a3_d30_holds_when_the_gate_is_human(tmp_path: Path) -> None:
+    gk = gk_for(tmp_path, {"preset": "strict"})  # escalation is human
+    task, _ = drive_any(gk, "call_for_edit_at_the_cap_from_held")
+    gate_error(gk, lambda: decide_kind(gk, task, ("auto", "auto", "approve")))
+    decide_kind(gk, task, (HUMAN, "terminal", "approve"))
+    for kind in ESCALATION_KINDS:
+        gate_error(gk, lambda k=kind: decide_kind(gk, task, k))
+
+
+MISSING: dict[str, Any] = {"missing": ["report.md"]}
+RETRIES: dict[str, list[tuple[str, dict[str, Any]]]] = {
+    "jira-retries-and-the-key": [
+        (ev.ESCALATION, {"reason": "all attempts failed"}),
+        (ev.ESCALATION, {"reason": "retry: Jira unreachable", "ticket": None}),
+        (ev.ESCALATION, {"reason": "filed", "ticket": "AD-500"}),
+    ],
+    "two-edit-rounds-then-filed-noting-it": [
+        (ev.ATTACHMENT_MISSING, MISSING),
+        (ev.ATTACHMENT_MISSING, MISSING),
+        (ev.FILED_WITH_MISSING, {"reason": "edit_rounds", **MISSING}),
+        (ev.ESCALATION, {"reason": "filed", "ticket": "AD-501"}),
+    ],
+    "cap-reached-during-the-edit": [
+        (ev.ATTACHMENT_MISSING, MISSING),
+        (ev.FILED_WITH_MISSING, {"reason": "cap", **MISSING}),
+    ],
+    "edit-done-then-a-question": [
+        (ev.ATTACHMENT_MISSING, MISSING),
+        (ev.EDIT_DONE, {}),
+        (ev.EDIT_REQUESTED, {"question": "which test fails first?"}),
+        (ev.EDIT_DONE, {}),
+        (ev.ESCALATION, {"reason": "filed", "ticket": "AD-502"}),
+    ],
+    "a-stop-in-the-edit-then-the-check-again": [
+        (ev.ATTACHMENT_MISSING, MISSING),
+        ("agent.stopped", {"then": "retry"}),
+        (ev.ATTACHMENT_MISSING, MISSING),
+        (ev.EDIT_DONE, {}),
+    ],
+    "a-stop-after-filing": [
+        (ev.ESCALATION, {"reason": "all attempts failed"}),
+        (ev.EDIT_REQUESTED, {"question": "why this approach?"}),
+        ("agent.stopped", {"then": "escalate"}),
+        (ev.EDIT_REQUESTED, {"question": "and now?"}),
+        (ev.EDIT_DONE, {}),
+    ],
+}
+
+
+@pytest.mark.parametrize("retry", RETRIES)
+@pytest.mark.parametrize("start", ["failed", "rejected"])
+def test_a3_d30_filing_retries_are_still_taken_and_the_gate_stays_decided(
+    tmp_path: Path, start: str, retry: str
+) -> None:
+    """D30: retrying the filing is unaffected (those are events, not decisions). Every engine event of the filing
+    (escalation records, the attachment check and its rounds, file anyway, a question, a stop in the edit) is
+    written and folded as before; through all of them the task stays at the gate, so the gate stays decided."""
+    gk = from_base(tmp_path, f"drive:{start}", _driven(start))
+    task = "T1"
+    decide_kind(gk, task, ("auto", "auto", "approve"))
+    at_gate = (T.FAILED, T.REJECTED, T.CALL_FOR_EDIT, T.ESCALATED)
+    for type_, data in RETRIES[retry]:
+        put(gk, type_, task, **data)
+        assert task_state(gk, task) in at_gate
+        assert gate_reached(evs(gk), "escalation", task)
+        for kind in ESCALATION_KINDS:
+            gate_error(gk, lambda k=kind: decide_kind(gk, task, k))
+        reads_never_crash(gk)
+        change = gk.change_gate("escalation", "auto", who=HUMAN)
+        assert task in change.data["reached_tasks"]
+    assert len(escalation_rows(gk, task)) == 1
+
+
+LEAVING = (
+    "pending",
+    "planning",
+    "awaiting_plan",
+    "plan_approved",
+    "coding",
+    "testing",
+    "passed",
+    "awaiting_result",
+    "held",
+)
+"""States a task can be escalated from at the spending cap (FR18, D29 (2)) and return to after a stop in
+`call_for_edit` (D29 (1)); none of them is at the escalation gate."""
+WAYS_BACK = ("cap-again", "escalated", "fails-or-is-rejected")
+STOPS: list[dict[str, Any]] = [
+    {"then": "hold"},
+    {"then": "retry"},
+    {"then": "escalate"},
+    {},
+]
+
+
+def to_origin(gk: Gatekeeper, origin: str) -> None:
+    """T1 (one attempt) at `origin`; T9 stays pending so the requirement stays in progress."""
+    in_progress(gk, {"T1": [], "T9": []}, ma=1)
+    if origin == "pending":
+        return
+    put(gk, "task_started", "T1")
+    if origin == "planning":
+        return
+    put(gk, "plan_drafted", "T1")
+    if origin == "awaiting_plan":
+        return
+    rec(gk, "plan", task="T1")
+    if origin == "plan_approved":
+        return
+    gk.log.append(ev.attempt_started(REQ, "T1", 1))
+    if origin == "coding":
+        return
+    if origin == "held":
+        put(gk, "agent.stopped", "T1", then="hold")
+        return
+    put(gk, "coding_finished", "T1")
+    if origin == "testing":
+        return
+    gk.log.append(ev.attempt_finished(REQ, "T1", 1, outcome="passed"))
+    if origin == "awaiting_result":
+        put(gk, "result_requested", "T1")
+
+
+def back_to_the_gate(gk: Gatekeeper, way: str) -> TaskState:
+    if way == "cap-again":
+        put(gk, ev.ATTACHMENT_MISSING, "T1", **MISSING)
+        return T.CALL_FOR_EDIT
+    if way == "escalated":
+        put(gk, ev.ESCALATION, "T1", reason="cap reached")
+        return T.ESCALATED
+    state = task_state(
+        gk, "T1"
+    )  # carry on until the last attempt fails, or the result is rejected
+    if state is T.HELD:
+        put(gk, "task_resumed", "T1")
+        state = T.CODING
+    if state is T.PENDING:
+        put(gk, "task_started", "T1")
+        state = T.PLANNING
+    if state is T.PLANNING:
+        put(gk, "plan_drafted", "T1")
+        state = T.AWAITING_PLAN
+    if state is T.AWAITING_PLAN:
+        rec(gk, "plan", task="T1")
+        state = T.PLAN_APPROVED
+    if state is T.PLAN_APPROVED:
+        gk.log.append(ev.attempt_started(REQ, "T1", 1))
+        state = T.CODING
+    if state is T.CODING:
+        put(gk, "coding_finished", "T1")
+        state = T.TESTING
+    if state is T.TESTING:
+        gk.log.append(ev.attempt_finished(REQ, "T1", 1, outcome="failed"))
+        return T.FAILED
+    if state is T.PASSED:
+        put(gk, "result_requested", "T1")
+    rec(gk, "result", "reject", task="T1", comments="not what was asked")
+    return T.REJECTED
+
+
+@pytest.mark.parametrize("way", WAYS_BACK)
+@pytest.mark.parametrize("origin", LEAVING)
+def test_a3_d30_per_visit_a_task_that_left_the_gate_takes_one_new_decision(
+    tmp_path: Path, origin: str, way: str
+) -> None:
+    """D29 (1) lets a task leave the escalation gate: a stop in `call_for_edit` returns it to where it came from,
+    unfiled. D30 says "like every other gate", and every other gate takes one decision per arrival (a new draft
+    re-opens it); §8's escalation gate confirms a ticket before it is created, and the left visit created none. So
+    each visit takes exactly one decision: refused again in the visit, refused while away (not at the gate), one
+    new decision when the task comes back by any route, then refused again."""
+    i = LEAVING.index(origin) + len(LEAVING) * WAYS_BACK.index(way)
+    first = ESCALATION_KINDS[i % len(ESCALATION_KINDS)]
+    second = ESCALATION_KINDS[(i + 2) % len(ESCALATION_KINDS)]
+
+    def build(b: Gatekeeper) -> None:
+        snapshot(b)  # escalation is auto
+        to_origin(b, origin)
+
+    gk = from_base(tmp_path, f"origin:{origin}", build)
+    assert task_state(gk, "T1").value == origin
+    put(
+        gk, ev.ATTACHMENT_MISSING, "T1", **MISSING
+    )  # escalated at the cap: the check runs first
+    assert task_state(gk, "T1") is T.CALL_FOR_EDIT
+    decide_kind(gk, "T1", first)  # visit 1
+    for kind in ESCALATION_KINDS:
+        gate_error(gk, lambda k=kind: decide_kind(gk, "T1", k))
+    put(gk, "agent.stopped", "T1", **STOPS[i % len(STOPS)])  # D29 (1)
+    assert task_state(gk, "T1").value == origin
+    assert not gate_reached(evs(gk), "escalation", "T1")
+    for kind in ESCALATION_KINDS:  # away from the gate: nothing to decide
+        gate_error(gk, lambda k=kind: decide_kind(gk, "T1", k))
+    assert (
+        "T1"
+        not in gk.change_gate("escalation", "auto", who=HUMAN).data["reached_tasks"]
+    )
+    arrived = back_to_the_gate(gk, way)  # visit 2
+    assert task_state(gk, "T1") is arrived
+    assert gate_reached(evs(gk), "escalation", "T1")
+    decide_kind(gk, "T1", second)
+    for kind in ESCALATION_KINDS:
+        gate_error(gk, lambda k=kind: decide_kind(gk, "T1", k))
+    assert [(e.actor, e.data["decision"]) for e in escalation_rows(gk, "T1")] == [
+        (first[0], first[2]),
+        (second[0], second[2]),
+    ]
+
+
+def test_a3_d30_each_of_several_visits_takes_exactly_one_decision(
+    tmp_path: Path,
+) -> None:
+    gk = gk_for(tmp_path)
+    to_origin(gk, "coding")
+    taken = []
+    for kind in (ESCALATION_KINDS[0], ESCALATION_KINDS[3], ESCALATION_KINDS[1]):
+        put(gk, ev.ATTACHMENT_MISSING, "T1", **MISSING)
+        taken.append(decide_kind(gk, "T1", kind))
+        for other in ESCALATION_KINDS:
+            gate_error(gk, lambda k=other: decide_kind(gk, "T1", k))
+        put(gk, "agent.stopped", "T1", then="hold")
+        assert task_state(gk, "T1") is T.CODING
+        for other in ESCALATION_KINDS:
+            gate_error(gk, lambda k=other: decide_kind(gk, "T1", k))
+    put(gk, ev.ATTACHMENT_MISSING, "T1", **MISSING)
+    put(gk, ev.FILED_WITH_MISSING, "T1", reason="cap", **MISSING)  # D29 (3)
+    assert task_state(gk, "T1") is T.ESCALATED
+    taken.append(decide_kind(gk, "T1", ESCALATION_KINDS[2]))
+    for other in ESCALATION_KINDS:
+        gate_error(gk, lambda k=other: decide_kind(gk, "T1", k))
+    assert [e.seq for e in escalation_rows(gk, "T1")] == [e.seq for e in taken]
+
+
+def test_a3_d30_a_visit_without_a_decision_leaves_the_next_visit_open(
+    tmp_path: Path,
+) -> None:
+    gk = gk_for(tmp_path)
+    to_origin(gk, "testing")
+    put(gk, ev.ATTACHMENT_MISSING, "T1", **MISSING)
+    put(
+        gk, "agent.stopped", "T1"
+    )  # no `then`: hold by default; back to testing either way (D29)
+    assert task_state(gk, "T1") is T.TESTING
+    gk.log.append(ev.attempt_finished(REQ, "T1", 1, outcome="failed"))
+    assert task_state(gk, "T1") is T.FAILED
+    decide_kind(gk, "T1", (HUMAN, "form", "approve"))
+    for kind in ESCALATION_KINDS:
+        gate_error(gk, lambda k=kind: decide_kind(gk, "T1", k))
+
+
+def test_a3_d30_another_tasks_visits_never_reopen_a_decided_gate(
+    tmp_path: Path,
+) -> None:
+    gk = gk_for(tmp_path)
+    in_progress(gk, {"T1": [], "T2": [], "T9": []}, ma=1)
+    failed_task(gk, "T1")
+    decide_kind(gk, "T1", ("auto", "auto", "approve"))
+    at_plan(gk, "T2")
+    rec(gk, "plan", task="T2")
+    gk.log.append(ev.attempt_started(REQ, "T2", 1))
+    put(gk, ev.ATTACHMENT_MISSING, "T2", **MISSING)
+    decide_kind(gk, "T2", (HUMAN, "form", "approve"))  # T2's own gate
+    put(gk, "agent.stopped", "T2", then="hold")  # T2 leaves its gate
+    put(gk, "coding_finished", "T2")
+    gk.log.append(ev.attempt_finished(REQ, "T2", 1, outcome="failed"))
+    decide_kind(gk, "T2", (HUMAN, "terminal", "reject"))  # T2's next visit
+    for task in ("T1", "T2"):
+        for kind in ESCALATION_KINDS:
+            gate_error(gk, lambda t=task, k=kind: decide_kind(gk, t, k))
+    assert len(escalation_rows(gk, "T1")) == 1
+    assert len(escalation_rows(gk, "T2")) == 2
