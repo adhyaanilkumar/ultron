@@ -30,3 +30,5 @@
 | 2026-11-11 | merge | v0/T35 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | settings | Fable use (self-build) | adhyaanilkumar | restrict | Fable 5.2 (R6) only after a counted failure at R5 |
 | 2026-11-11 | settings | MCP use (self-build) | adhyaanilkumar | require | agents use the MCP named in each task's mcp line from now on |
+| 2026-11-11 | result | T05 rerun | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T05 into v0-design | adhyaanilkumar | approve | |
