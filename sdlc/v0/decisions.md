@@ -111,3 +111,10 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | sent back | T05 (merged; reopens) | adhyaanilkumar | rerun | lock starvation: 1 in ~11 runs of the 4-writer test hangs to the 30 s lock timeout; make the lock fair; R4, not counted |
 | 2026-11-11 | sent back | T08 (merged; reopens) | engine | rerun | D29 transitions (AC7); R3, not counted |
 | 2026-11-11 | plan | AD-437 (T06) | adhyaanilkumar | defer | owner will take AD-437 up at the end |
+| 2026-11-11 | attempt | T18 attempt 1 (R2) | engine | fail | 3 failed, 3278 passed: tasks.md cut at 200 KB before the task section is found; prompts don't say only the END marker with the same sha256 closes a fence; NUL bytes reach the prompt; climb to R3 |
+
+### T18 · Context builder and prompts
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R2 | First implementation | Failed (3 tests): tasks.md truncated before finding the task section; no fence-closing rule in prompts; NUL bytes in prompts |
+| 2 | R3 | Find the task section in the full text, truncate after; one rule sentence on sha256 fence ends in the common prompt; strip NULs from prompt text (hash raw bytes) | In progress |
