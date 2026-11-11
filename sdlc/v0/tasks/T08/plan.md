@@ -56,3 +56,33 @@ FR18, NFR1. Depends on T05 (`store/events.py`).
 - AC3: same file: `rejected` and `failed` escalate; a task behind an escalated dependency is `blocked`.
 - AC4: same file: one case each for complete, partial, escalated.
 - AC5: `tests/engine/test_ids.py`: regex, local date, forced collision.
+
+## Attempt 2 (R3)
+Author: developer agent (R3, attempt 2). Attempt 1 failed 2 of 139 acceptance tests (`test_ac3_a_repeated_escalation_
+record_is_harmless`, `test_ac4_escalation_record_with_the_jira_ticket_after_the_requirement_settled`).
+
+**Cause.** In `_apply_task` the check "task events need the requirement `in_progress`" runs before the repeat-escalation
+no-op. When a task's escalation settles the requirement (`partial` or `escalated`), the later `escalation` record that
+carries the Jira key (spec §12: the ticket and its sprint placement are recorded in the log after filing, and a
+pending filing is retried) raises `IllegalTransition`, so a real log can't be replayed. The unit test for the repeat
+only covered a requirement still `in_progress` (another task was pending).
+
+**Fix.** In `_apply_task`, handle an `escalation` for a known task that is already `escalated` as a no-op before the
+requirement check, whatever the requirement's state. A *first* escalation (task not yet `escalated`) still needs the
+requirement `in_progress`, and an `approved` or `blocked` task still can't escalate. No table changes.
+
+**Other events after settling.** Checked T05's types and spec §10/§12: `gate_decision` for `merge`, `deploy` and
+`escalation`, `agent_call`, `config_snapshot` and `intake` are already ignored by the fold, and a requirement-level
+`escalation` (no task) is already a no-op. The repeated task `escalation` record was the only one that failed.
+
+**Files.** `src/ultron/engine/states.py`, `tests/engine/test_states.py`.
+
+**Order.** Unit tests first (red): a single-task requirement escalates (requirement `escalated`), then the ticket
+record; the last unfinished task escalates to `partial`, then the ticket record; a first escalation of an approved
+task after the requirement settled is still illegal. Then the fix (green), then build, lint, test.
+
+**Risks.** A repeat record for an escalated task is accepted at any time, so a duplicate written by mistake is silently
+accepted; that is harmless because it changes no state. The Jira key itself is not kept in the snapshot (state only).
+
+**Proof.** `pytest tests/engine/test_states.py` (new tests) and `pytest tests/acceptance/test_t08.py` (all pass), then
+`make build`, `make lint`, `make test`.
