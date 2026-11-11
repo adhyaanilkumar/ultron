@@ -6,6 +6,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import pyte
 import pytest
 
 from ultron.look import palette, render
@@ -34,66 +35,113 @@ def _codes() -> dict[str, str]:
     return out
 
 
-def _hex_to_rgb(h: str) -> tuple[int, int, int]:
-    return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
+def _screen(text: str, cols: int = 80, rows: int = 40) -> pyte.Screen:
+    """Stateful rendering: colour state carries across cells and lines (lesson L1)."""
+    screen = pyte.Screen(cols, rows)
+    pyte.Stream(screen).feed(text.replace("\n", "\r\n"))
+    return screen
 
 
-def _cells(
-    line: str,
-) -> list[tuple[str, tuple[int, int, int] | None, tuple[int, int, int] | None]]:
-    fg = bg = None
-    cells = []
-    pos = 0
-    for m in ANSI.finditer(line):
-        for ch in line[pos : m.start()]:
-            cells.append((ch, fg, bg))
-        params = m.group(0)[2:-1]
-        nums = [int(x) for x in params.split(";") if x != ""] or [0]
-        i = 0
-        while i < len(nums):
-            n = nums[i]
-            if n == 0:
-                fg = bg = None
-            elif n == 38:
-                fg = (nums[i + 2], nums[i + 3], nums[i + 4])
-                i += 4
-            elif n == 48:
-                bg = (nums[i + 2], nums[i + 3], nums[i + 4])
-                i += 4
-            elif n == 39:
-                fg = None
-            elif n == 49:
-                bg = None
-            i += 1
-        pos = m.end()
-    for ch in line[pos:]:
-        cells.append((ch, fg, bg))
-    return cells
+def _mascot_screen(tail: str = "") -> pyte.Screen:
+    lines = render.mascot_lines(colour=True, unicode=True)
+    return _screen("\n".join(lines) + "\n" + tail)
 
 
 def test_ac1_mascot_cells_match_map() -> None:
     rows = _map()
     codes = _codes()
     assert set(codes) == set("HCSLEF")
-    lines = render.mascot_lines(colour=True, unicode=True)
-    assert len(lines) == 14
-    for i, line in enumerate(lines):
-        cells = _cells(line)
-        assert len(cells) == 20, (i, len(cells))
+    assert len(render.mascot_lines(colour=True, unicode=True)) == 14
+    screen = _mascot_screen()
+    up, down = "▀", "▄"
+    for i in range(14):
+        assert screen.buffer[i][20].data == " "
         top, bottom = rows[2 * i], rows[2 * i + 1]
-        for x, (ch, fg, bg) in enumerate(cells):
+        for x in range(20):
             t, b = top[x], bottom[x]
-            where = (i, x, t, b, ch, fg, bg)
+            c = screen.buffer[i][x]
+            where = (i, x, t, b, c.data, c.fg, c.bg)
             if t == "." and b == ".":
-                assert ch == " ", where
+                assert c.data == " " and c.bg == "default", where
             elif t != "." and b != ".":
-                assert ch == "▀", where
-                assert fg == _hex_to_rgb(codes[t]), where
-                assert bg == _hex_to_rgb(codes[b]), where
+                assert c.data == up, where
+                assert c.fg == codes[t][1:], where
+                assert c.bg == codes[b][1:], where
             elif b == ".":
-                assert ch == "▀" and fg == _hex_to_rgb(codes[t]) and bg is None, where
+                assert c.data == up and c.fg == codes[t][1:], where
+                assert c.bg == "default", where
             else:
-                assert ch == "▄" and fg == _hex_to_rgb(codes[b]) and bg is None, where
+                assert c.data == down and c.fg == codes[b][1:], where
+                assert c.bg == "default", where
+
+
+def test_ac6_transparent_cells_default_background_and_mirror() -> None:
+    rows = _map()
+    screen = _mascot_screen()
+    checked = 0
+    for i in range(14):
+        top, bottom = rows[2 * i], rows[2 * i + 1]
+        for x in range(20):
+            if top[x] == "." and bottom[x] == ".":
+                c = screen.buffer[i][x]
+                assert (c.bg, c.fg) == ("default", "default"), (i, x)
+        for x in range(10):
+            m = 19 - x
+            if (top[x], bottom[x]) == (top[m], bottom[m]):
+                a, b = screen.buffer[i][x], screen.buffer[i][m]
+                assert (a.data, a.fg, a.bg) == (b.data, b.fg, b.bg), (i, x, m)
+                checked += 1
+    assert checked > 100
+
+
+def test_ac7_reset_after_mascot_and_wordmark() -> None:
+    screen = _mascot_screen(tail="after")
+    for i in range(14):
+        c = screen.buffer[i][20]
+        assert (c.fg, c.bg) == ("default", "default"), i
+    for c in (screen.buffer[14][0], screen.buffer[14][4]):
+        assert c.data in "after" and (c.fg, c.bg) == ("default", "default")
+    ws = _screen(render.wordmark(colour=True) + "\nnext")
+    assert "".join(ws.buffer[0][x].data for x in range(11)) == "U L T R O N"
+    u = ws.buffer[0][0]
+    assert u.bold and u.fg == "e5484d"
+    end = ws.buffer[0][11]
+    assert (end.fg, end.bg, end.bold) == ("default", "default", False)
+    n = ws.buffer[1][0]
+    assert n.data == "n" and (n.fg, n.bg, n.bold) == ("default", "default", False)
+
+
+def test_look_command_output_through_pyte_when_coloured() -> None:
+    """Run the hidden command on a faked TTY and render its real output."""
+    import sys
+
+    from ultron import cli
+
+    class Tty(io.StringIO):
+        encoding = "utf-8"
+
+        def isatty(self) -> bool:
+            return True
+
+    out = Tty()
+    old = sys.stdout
+    os.environ.pop("NO_COLOR", None)
+    sys.stdout = out
+    try:
+        assert cli.main(["look"]) == 0
+    finally:
+        sys.stdout = old
+    screen = _screen(out.getvalue() + "tail")
+    rows = _map()
+    codes = _codes()
+    for i in range(14):
+        for x in range(20):
+            t, b = rows[2 * i][x], rows[2 * i + 1][x]
+            c = screen.buffer[i][x]
+            if t == "." and b == ".":
+                assert c.bg == "default", (i, x)
+            elif t != "." and b != ".":
+                assert (c.fg, c.bg) == (codes[t][1:], codes[b][1:]), (i, x)
 
 
 def test_ac1_plain_mascot_is_14_lines_of_20() -> None:
