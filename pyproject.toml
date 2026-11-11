@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "An AI-native SDLC pipeline injected into coding agents."
 readme = "CLAUDE.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = ["pydantic"]
 
 [project.scripts]
 ultron = "ultron.cli:main"

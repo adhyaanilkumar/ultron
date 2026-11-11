@@ -986,6 +986,9 @@ wheels = [
 name = "ultron"
 version = "0.0.0"
 source = { editable = "." }
+dependencies = [
+    { name = "pydantic" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1000,6 +1003,7 @@ spikes = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "pydantic" }]
 
 [package.metadata.requires-dev]
 dev = [
