@@ -1,4 +1,4 @@
-# T02 plan: verify first, host behaviour in Claude Code
+﻿# T02 plan: verify first, host behaviour in Claude Code
 Rung: R1 (kept). Rubric total 3: one throwaway spike, one self-test, the rest is owner observation. Nothing here touches production code.
 
 ## Files that change
@@ -29,14 +29,16 @@ Rung: R1 (kept). Rubric total 3: one throwaway spike, one self-test, the rest is
 - A "no" outcome is valid evidence; findings must record the observed fact, not the hoped-for one. A hook log with the `!` line missing may also mean the hook was not loaded: the owner also runs one model-issued Bash call as a control.
 - Parallel sibling worktrees edit `pyproject.toml`/`uv.lock` too: expect a trivial merge conflict on the dependency list.
 
-## Proof
-- AC1: `tests/test_spike_host.py::test_server_self_test` and `uv run python spikes/host/server.py --self-test` (exit 0); `test_hook_logs_and_allows` covers the hook half of the file list.
-- AC2: owner steps 1-2; recorded in `findings.md` row 1 (form seen or not, model can answer or not).
-- AC3: owner step 2; `findings.md` row 2 (progress shown?, resource update shown?).
-- AC4: owner step 3 plus control call; `hook.log` content cited in row 3.
-- AC5: `tests/test_spike_host.py::test_findings_host_table` checks the "Host" section has the 4 rows and the 5 columns (and, at the end, no "pending" cells). Rows: elicitation, notifications, `!` commands, version.
+## Proof (revised criteria, by verify_with)
+- AC1: `command` `uv run python spikes/host/server.py --self-test` (exit 0) and `mcp-client` `tests/acceptance/test_t02.py::test_ac1_server_lists_tool_over_stdio` (scripted stdio client lists exactly `spike_probe`); `tests/test_spike_host.py` covers the same plus the hook.
+- AC2: [owner] owner steps 1-3; form result and screenshot path go in `findings.md` row 1. README step 3 now says to save a screenshot and record its path. Optional preview: MCP Inspector via `npx` (free, not connected) to see the elicitation request; it does not replace the Claude Code check.
+- AC3: [owner] owner step 3; row 2, screenshot path recorded.
+- AC4: [owner] owner step 4 plus control call; `hook.log` lines quoted in row 3.
+- AC5: `tests/acceptance/test_t02.py::test_ac5_*` and `tests/test_spike_host.py::test_findings_host_table`: Host table has 5 columns and one row per question.
+- AC6: [owner] owner fills every PENDING cell; the check is `grep -c PENDING sdlc/v0/findings.md` is 0 in the Host section and each named screenshot path exists. Cannot pass until the owner steps are done; README step 5 states the rule.
 - All commits gated on `make build`, `make lint`, `make test` success lines.
 
 ## Departures from plan (code step)
 - `mcp` is pinned `<2` (resolved 1.30.0): mcp 2.x removed `mcp.server.fastmcp` (renamed `MCPServer`, different elicit flow). `ruff` excludes `spikes/` (`[tool.ruff] extend-exclude`).
 - Owner steps in the README are 5 numbered steps; step 4 includes the model-issued Bash control call.
+
