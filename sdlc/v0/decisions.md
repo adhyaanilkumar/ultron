@@ -67,6 +67,7 @@ For every task that needs more than one attempt: what each attempt did different
 | 2 | R3 | Repeat escalation for an already-escalated task checked first and made a no-op; a first escalation on a settled requirement stays illegal | Passed: 163/163 T08 acceptance tests (24 new); new tests fail on attempt-1 code for the right reason |
 | Rerun for D27 (send-back, not counted) | R3 | Added `call_for_edit` with triggers `attachment_missing`, `edit_requested`, `edit_done`; a filed task in call_for_edit counts as escalated; not an attempt | Passed: 220 T08 acceptance tests, 1844 total |
 | Reopened for D28 (send-back, not counted) | R3 | One new requirement transition: `awaiting_intent` + `intent.changes` → `intake_drafting` | Passed: tester updated the 3 tests (owner-approved) and added the full loop; 1881 total |
+| Reopened for D29 (send-back, not counted) | R3 | `edit_stopped` returns to `edit_from`; `attachment_missing` from every escalating state; second round, `EDIT_ROUNDS_MAX = 2`; `filed_with_missing` with reason `cap` or `edit_rounds` | Passed: 491 T08 acceptance tests; 5 mutated copies each caught |
 
 ### T13 · Usage and caps (correction, not a failed attempt)
 | Attempt | Rung | What was different | Result |
