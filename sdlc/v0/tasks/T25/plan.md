@@ -149,6 +149,12 @@ Attempt 1 failed at the testing agent: 2 of 85 acceptance tests in `tests/accept
 | Defect | Test (red first, then green) |
 |---|---|
 | 1 | `tests/jira/test_client.py::test_wrapped_errors_hold_no_auth[...]`: ConnectError, ReadTimeout, RemoteProtocolError, DecodingError, TooManyRedirects; walks `__cause__`, `__context__`, `args`, `vars()` and slots of every reachable object (not tracebacks) for the token, plain and Base64 |
-| 2 | `::test_post_create_failure_carries_key[...]`: missing file, directory as file, sprint without `id`, non-JSON sprint list; one create call, `JiraError.issue_key == "TEST-1"`, chain clean |
-| 3 | `::test_board_without_sprints_goes_to_backlog`, `::test_other_sprint_lookup_errors_still_fail[...]` |
+| 2 | `::test_unreadable_attachment_carries_key[missing/directory]` and `::test_unexpected_sprint_response_carries_key[sprint-without-id/not-json]`: one create call, `JiraError.issue_key == "TEST-1"`, no cause or context, nothing reachable; `::test_wrapped_error_after_create_holds_no_auth` |
+| 3 | `::test_board_without_sprints_goes_to_backlog`, `::test_plain_backlog_has_no_reason`, `::test_other_sprint_lookup_errors_still_fail[401/403/404/500]` |
 | all | `tests/acceptance/test_t25.py` 85 of 85; `make build`, `make lint`, `make test` |
+
+### Changes during build (attempt 2)
+- Test names in the proof table were settled while writing them (above). `test_reachable_text_finds_the_header_in_a_raw_httpx_error`
+  checks the walker itself: it must find the header on a raw httpx error, on a hidden `__context__`, and the token
+  inside `JiraCredentials`.
+- The broad `except Exception` after create needs `# noqa: BLE001` (ruff's blind-except rule); it is deliberate.

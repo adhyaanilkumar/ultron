@@ -2,7 +2,7 @@
   "_capture": {
     "date": "2026-11-11",
     "source": "docs: Jira Software Cloud REST API, GET /rest/agile/1.0/board/{boardId}/sprint (response shape)",
-    "notes": "Rovo can't read a board's sprint list, so AK's board wasn't captured (owner step). Keys: the state query each response answers."
+    "notes": "Rovo can't read a board's sprint list, so AK's board wasn't captured (owner step). Keys: the state query each response answers. no_sprints: the 400 body for a board without sprints (kanban). Status from the docs (400 'request is invalid'); message text as Atlassian reports it for kanban boards, not captured live."
   },
   "active": {
     "maxResults": 50,
@@ -49,5 +49,14 @@
     "startAt": 0,
     "isLast": true,
     "values": []
+  },
+  "no_sprints": {
+    "status": 400,
+    "body": {
+      "errorMessages": [
+        "The board does not support sprints"
+      ],
+      "errors": {}
+    }
   }
 }

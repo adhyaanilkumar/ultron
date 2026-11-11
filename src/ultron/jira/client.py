@@ -170,19 +170,32 @@ class IssueType:
 
 @dataclass(frozen=True)
 class SprintChoice:
-    """Where the issue went: the active sprint, the first future sprint, or the backlog."""
+    """Where the issue went: the active sprint, the first future sprint, or the backlog.
+
+    `reason` says why it's the backlog when that isn't simply "no sprint" (a board without sprints, such as kanban).
+    """
 
     kind: SprintKind
     sprint_id: int | None = None
     sprint_name: str | None = None
+    reason: str | None = None
 
     def describe(self) -> str:
         if self.kind == "backlog":
-            return "backlog (the board has no active or future sprint)"
+            return (
+                f"backlog ({self.reason or 'the board has no active or future sprint'})"
+            )
         return f"{self.kind} sprint {self.sprint_name} (id {self.sprint_id})"
 
     def to_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "id": self.sprint_id, "name": self.sprint_name}
+        out: dict[str, Any] = {
+            "kind": self.kind,
+            "id": self.sprint_id,
+            "name": self.sprint_name,
+        }
+        if self.reason is not None:
+            out["reason"] = self.reason
+        return out
 
 
 @dataclass(frozen=True)
@@ -297,15 +310,24 @@ class JiraClient:
         )
         method = endpoint.method
         log.debug("jira %s %s", method, path)
+        # Every httpx error holds the request, and the request holds the auth header. `raise ... from None` would
+        # still keep it as `__context__`, so only its type name is kept, and the new error is raised after the
+        # `except` block, with no cause and no context.
+        failure = ""
+        unreachable = False
         try:
             response = self._http.request(method, path, **kwargs)
-        except httpx.TransportError as exc:
-            # Re-raised without the original: it holds the request, and the request holds the auth header.
+        except httpx.HTTPError as exc:
+            failure = type(exc).__name__
+            unreachable = isinstance(exc, httpx.TransportError)
+        if unreachable:
             raise JiraUnreachable(
-                f"Jira {method} {path} unreachable: {type(exc).__name__}",
-                method=method,
-                path=path,
-            ) from None
+                f"Jira {method} {path} unreachable: {failure}", method=method, path=path
+            )
+        if failure:
+            raise JiraError(
+                f"Jira {method} {path} failed: {failure}", method=method, path=path
+            )
         if response.is_error:
             raise JiraError(
                 f"Jira {method} {path} failed with {response.status_code}: {_error_text(response)}",
@@ -387,7 +409,16 @@ class JiraClient:
 
     def attach(self, key: str, path: Path) -> str:
         """Upload one file to the issue; returns the stored file name."""
-        content = path.read_bytes()
+        failure = ""
+        content = b""
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            failure = f"{type(exc).__name__}: {exc.strerror or exc}"
+        if failure:
+            raise JiraError(
+                f"attachment {path.name} for {key} can't be read ({failure})"
+            )
         data = self._request(
             "issue_attach",
             {"key": key},
@@ -410,9 +441,19 @@ class JiraClient:
         return dict(values[0]) if values else None
 
     def choose_sprint(self, board: int) -> SprintChoice:
-        """The board's active sprint, else its first future sprint, else the backlog. Reads only."""
+        """The board's active sprint, else its first future sprint, else the backlog. Reads only.
+
+        A board without sprints (kanban) answers the lookup with 400; that is the backlog too (spec §12).
+        """
         for state in ("active", "future"):
-            sprint = self._first_sprint(board, state)
+            try:
+                sprint = self._first_sprint(board, state)
+            except JiraError as exc:
+                if exc.status != 400 or isinstance(exc, JiraUnreachable):
+                    raise
+                return SprintChoice(
+                    "backlog", reason=f"board {board} has no sprints: {exc}"
+                )
             if sprint is not None:
                 kind: SprintKind = "active" if state == "active" else "future"
                 return SprintChoice(
@@ -448,21 +489,37 @@ class JiraClient:
             labels=labels,
         )
         log.info("jira created %s as %s", key, chosen.name)
+        # From here on the issue exists: every failure must carry its key, or a retry files it twice.
+        failure = ""
         try:
-            names = tuple(self.attach(key, path) for path in attachments)
-            sprint = self.choose_sprint(target.board)
-            if sprint.sprint_id is not None:
-                self.move_to_sprint(sprint.sprint_id, [key])
+            names, sprint = self._attach_and_place(key, target.board, attachments)
         except JiraError as exc:
             exc.issue_key = key
             raise
-        log.info("jira %s placed in %s", key, sprint.describe())
-        return EscalationResult(
-            key=key,
-            url=f"{self._base_url}/browse/{key}",
-            requested_type=issue_type,
-            issue_type=chosen.name,
-            fell_back=note is not None,
-            sprint=sprint,
-            attachments=names,
+        except Exception as exc:  # noqa: BLE001 - any failure here must still report the key
+            # Kept as text and raised after the block, so nothing from the failed step stays reachable.
+            failure = f"{type(exc).__name__}: {str(exc)[:MAX_ERROR_TEXT]}"
+        else:
+            log.info("jira %s placed in %s", key, sprint.describe())
+            return EscalationResult(
+                key=key,
+                url=f"{self._base_url}/browse/{key}",
+                requested_type=issue_type,
+                issue_type=chosen.name,
+                fell_back=note is not None,
+                sprint=sprint,
+                attachments=names,
+            )
+        raise JiraError(
+            f"Jira issue {key} was created, but a later step failed ({failure})",
+            issue_key=key,
         )
+
+    def _attach_and_place(
+        self, key: str, board: int, attachments: Sequence[Path]
+    ) -> tuple[tuple[str, ...], SprintChoice]:
+        names = tuple(self.attach(key, path) for path in attachments)
+        sprint = self.choose_sprint(board)
+        if sprint.sprint_id is not None:
+            self.move_to_sprint(sprint.sprint_id, [key])
+        return names, sprint

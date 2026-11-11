@@ -503,3 +503,201 @@ def test_fixtures_have_capture_header(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "@" not in text, "fixtures must not hold email addresses"
     assert "accountId" not in text
+
+
+# Attempt 2: wrapped errors keep no reference to the request (AC4) ---------------------------------------------
+
+
+def _reachable_text(root: object) -> Iterator[str]:
+    """Every string or bytes value reachable from `root` through exception chains, args, attributes and containers.
+
+    Tracebacks are not followed: their frames hold `self` (the client) in any method, and `repr(client)` is checked
+    separately.
+    """
+    seen: set[int] = set()
+    todo: list[tuple[object, int]] = [(root, 0)]
+    while todo:
+        obj, depth = todo.pop()
+        if obj is None or id(obj) in seen or depth > 12:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, str):
+            yield obj
+            continue
+        if isinstance(obj, bytes | bytearray | memoryview):
+            yield bytes(obj).decode("latin-1")
+            continue
+        if isinstance(obj, int | float) or callable(obj):  # numbers, classes, functions
+            continue
+        children: list[object] = []
+        if isinstance(obj, dict):
+            children += [*obj.keys(), *obj.values()]
+        elif isinstance(obj, list | tuple | set | frozenset):
+            children += list(obj)
+        if isinstance(obj, BaseException):
+            children += [obj.args, obj.__cause__, obj.__context__]
+        if hasattr(obj, "__dict__"):
+            children.append(vars(obj))
+        for klass in type(obj).__mro__:
+            slots = klass.__dict__.get("__slots__", ())
+            for slot in (slots,) if isinstance(slots, str) else slots:
+                children.append(getattr(obj, slot, None))
+        todo += [(child, depth + 1) for child in children]
+
+
+def _assert_nothing_reachable(exc: BaseException) -> None:
+    text = "\n".join(_reachable_text(exc))
+    assert SENTINEL not in text, "token reachable from the exception"
+    assert BASIC not in text, "Basic-auth header reachable from the exception"
+
+
+def test_reachable_text_finds_the_header_in_a_raw_httpx_error() -> None:
+    # The walker itself must see what it's meant to catch, or the tests below prove nothing.
+    request = httpx.Request("GET", BASE, headers={"Authorization": f"Basic {BASIC}"})
+    with pytest.raises(AssertionError, match="Basic-auth"):
+        _assert_nothing_reachable(httpx.ConnectError("x", request=request))
+    hidden = JiraError("outer")
+    hidden.__context__ = httpx.ConnectError("x", request=request)
+    with pytest.raises(AssertionError, match="Basic-auth"):
+        _assert_nothing_reachable(hidden)
+    with pytest.raises(AssertionError, match="token"):
+        _assert_nothing_reachable(JiraError("x", path=SENTINEL))
+    with pytest.raises(AssertionError, match="token"):
+        _assert_nothing_reachable(ValueError(JiraCredentials.from_env(env())))
+
+
+@pytest.mark.parametrize(
+    ("error", "unreachable"),
+    [
+        (httpx.ConnectError, True),
+        (httpx.ReadTimeout, True),
+        (httpx.RemoteProtocolError, True),
+        (httpx.DecodingError, False),
+        (httpx.TooManyRedirects, False),
+    ],
+    ids=lambda v: v.__name__ if isinstance(v, type) else str(v),
+)
+def test_wrapped_errors_hold_no_auth(
+    router: respx.MockRouter, jira: JiraClient, error: type, unreachable: bool
+) -> None:
+    router.get(ISSUETYPES).mock(side_effect=error)
+    with pytest.raises(JiraError) as info:
+        jira.escalate(TARGET, issue_type="Story", body=body())
+    exc = info.value
+    assert isinstance(exc, JiraUnreachable) is unreachable
+    assert exc.__cause__ is None and exc.__context__ is None
+    assert error.__name__ in str(exc) and ISSUETYPES in str(exc)
+    _assert_nothing_reachable(exc)
+
+
+def test_wrapped_error_after_create_holds_no_auth(
+    router: respx.MockRouter, jira: JiraClient
+) -> None:
+    mock_all(router)
+    router.get(SPRINTS).mock(side_effect=httpx.ReadTimeout)
+    with pytest.raises(JiraUnreachable) as info:
+        jira.escalate(TARGET, issue_type="Story", body=body())
+    assert info.value.issue_key == "TEST-1"
+    _assert_nothing_reachable(info.value)
+
+
+# Attempt 2: any failure after create carries the issue key -------------------------------------------------
+
+
+def _missing(tmp_path: Path) -> Path:
+    return tmp_path / "missing.log"
+
+
+def _directory(tmp_path: Path) -> Path:
+    folder = tmp_path / "attempt-1.log"
+    folder.mkdir()
+    return folder
+
+
+@pytest.mark.parametrize(
+    "make_path", [_missing, _directory], ids=["missing", "directory"]
+)
+def test_unreadable_attachment_carries_key(
+    router: respx.MockRouter, jira: JiraClient, tmp_path: Path, make_path: Any
+) -> None:
+    mock_all(router)
+    path = make_path(tmp_path)
+    with pytest.raises(JiraError) as info:
+        jira.escalate(TARGET, issue_type="Story", body=body(), attachments=[path])
+    assert info.value.issue_key == "TEST-1"
+    assert path.name in str(info.value)
+    assert len(sent(router, "POST", CREATE)) == 1
+    assert sent(router, "POST", ATTACH) == []
+    assert info.value.__cause__ is None and info.value.__context__ is None
+    _assert_nothing_reachable(info.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, json={"values": [{"name": "no id"}]}),
+        httpx.Response(200, text="<html>not json</html>"),
+    ],
+    ids=["sprint-without-id", "not-json"],
+)
+def test_unexpected_sprint_response_carries_key(
+    router: respx.MockRouter, jira: JiraClient, response: httpx.Response
+) -> None:
+    mock_all(router)
+    router.get(SPRINTS).mock(return_value=response)
+    with pytest.raises(JiraError) as info:
+        jira.escalate(TARGET, issue_type="Story", body=body())
+    assert info.value.issue_key == "TEST-1"
+    assert "TEST-1" in str(info.value)
+    assert len(sent(router, "POST", CREATE)) == 1
+    assert info.value.__cause__ is None and info.value.__context__ is None
+    _assert_nothing_reachable(info.value)
+
+
+# Attempt 2: a board without sprints (kanban) means the backlog ---------------------------------------------
+
+
+def test_board_without_sprints_goes_to_backlog(
+    router: respx.MockRouter, jira: JiraClient
+) -> None:
+    no_sprints = fixture("sprints.json")["no_sprints"]
+    mock_all(router)
+    router.get(SPRINTS).mock(
+        return_value=httpx.Response(no_sprints["status"], json=no_sprints["body"])
+    )
+    result = jira.escalate(TARGET, issue_type="Story", body=body())
+
+    assert result.sprint.kind == "backlog"
+    assert result.sprint.sprint_id is None
+    assert result.sprint.reason is not None
+    assert "does not support sprints" in result.sprint.reason
+    assert "does not support sprints" in result.sprint.describe()
+    assert result.to_dict()["sprint"]["kind"] == "backlog"
+    assert "does not support sprints" in result.to_dict()["sprint"]["reason"]
+    assert len(sent(router, "GET", SPRINTS)) == 1  # no second lookup
+    assert [
+        c for c in router.calls if "/rest/agile/1.0/sprint/" in c.request.url.path
+    ] == []
+
+
+def test_plain_backlog_has_no_reason(
+    router: respx.MockRouter, jira: JiraClient
+) -> None:
+    mock_all(router, sprints={})
+    result = jira.escalate(TARGET, issue_type="Story", body=body())
+    assert result.sprint.reason is None
+    assert result.to_dict()["sprint"] == {"kind": "backlog", "id": None, "name": None}
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+def test_other_sprint_lookup_errors_still_fail(
+    router: respx.MockRouter, jira: JiraClient, status: int
+) -> None:
+    mock_all(router)
+    router.get(SPRINTS).mock(
+        return_value=httpx.Response(status, json={"errorMessages": ["nope"]})
+    )
+    with pytest.raises(JiraError) as info:
+        jira.escalate(TARGET, issue_type="Story", body=body())
+    assert info.value.status == status
+    assert info.value.issue_key == "TEST-1"
