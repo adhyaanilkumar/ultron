@@ -133,7 +133,8 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R1 | First implementation | Failed (4 tests): prune vs open reader on Windows; torn tail swallows the next row; old attempt shown as current; untrusted wrapper can be closed by content |
-| 2 | R2 | Retry the prune replace; repair a torn tail under the lock before appending; filter by attempt and newest start; escape `untrusted-data` tags in content | Developer green (3156 passed, all of test_t28.py); in testing |
+| 2 | R2 | Retry the prune replace; repair a torn tail under the lock before appending; filter by attempt and newest start; escape `untrusted-data` tags in content | Failed (9 tests): A–D fixed; new defect: a second prune can lower the high-water mark and cursors get reused |
+| 3 | R3 | Never lower `activity.seq` (write the max of the stored mark and the rows); defang `lines` too | In progress |
 | 2026-11-11 | settings | agent types (self-build) | adhyaanilkumar | keep general-purpose | per-role agent classes go to a later version (backlog) |
 | 2026-11-11 | attempt | T18 attempt 2 (R3) | engine | fail | 3 failed, 3369 passed: C1 controls reach the prompt; a non-UTF-8 folder name breaks event logging after the call is charged; a BOM-prefixed tasks.md hides the first task; climb to R4 for attempt 3 (last) |
 | 2026-11-11 | attempt | T16 attempt 1 (R3) | engine | fail | 63 failed, 3421 passed: ~58 permission-policy bypasses (git via aliases/eval/wrappers/PowerShell quoting, shell writes to .git and outside the worktree, network via interpreters); usage-limit text matched in the agent's own result; interrupt can take 6-9 s when the session hangs; climb to R4 |
@@ -143,3 +144,4 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R3 | Denylist permission policy with a quote-aware shell parser; post-call diff check inside the worktree | Failed (63 tests): many policy bypasses; usage-limit misclassified from the agent's text; interrupt over 5 s when the session hangs |
 | 2 | R4 | Deny-by-default Bash allowlist instead of a denylist; outside-worktree and `.git` checks after every call; classify from SDK error fields only; one overall 5 s interrupt budget | In progress |
+| 2026-11-11 | attempt | T28 attempt 2 (R2) | engine | fail | 9 failed, 3202 passed: a second prune lowers activity.seq, so new rows reuse cursors a follower already passed; climb to R3 for attempt 3 (last) |
