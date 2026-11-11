@@ -5,6 +5,104 @@ T01 only.
 **Rung:** R3 at the start (Risk 2: the source of truth, concurrent writers, data loss). Attempt 2 climbed to R4 and
 passed. The rerun below stays at R4: a send-back to decomposition doesn't climb.
 
+## Reopened: lock starvation (R4, 2026-11-11)
+The owner reopened T05 (send-back, not counted): `test_t05.py::test_ac2_engine_lock_path_non_ascii_paths_and_payloads`
+(4 writer processes × 50 appends) took ~40 s and failed about 1 run in 11 on Windows, always while the machine was
+busy. Suspected cause: the 5 ms `LK_NBLCK` polling lock is unfair, so one writer starves. I measured before assuming.
+
+### Evidence (Windows 11, 24 logical CPUs, Defender real-time protection on)
+An instrumented replay of that test (same payloads, paths and lock path) recorded every lock acquire per writer:
+wait, polls, hold time, and the time of each step inside the lock. CPU load came from 24 busy-loop processes.
+- **Slow rounds are not starvation.** About 1 round in 8 to 10 under load took 27 to 50 s. In those rounds the lock
+  was idle only 0.14 to 0.2 s of the 33 to 50 s. Every writer was slow, and the median hold went from 12.5 ms to
+  198 to 349 ms. A fairer lock can't fix that: the lock was busy 99.6% of the time, and 200 holds of about 350 ms
+  is 70 s, more than the test's 45 s deadline.
+- **The time inside the lock is `_last_seq`**, which reopens the log for reading on every append: median 11 ms
+  normally and 347 ms in the slow round. `fsync` took 0.7 to 1 ms and `write` 0.1 ms.
+- **A read-open after another process's write is what's slow.** A micro-benchmark: the first open with read access
+  (`O_RDONLY` or `O_RDWR`) after a write took 9 to 60 ms at every file size from 1 KB to 50 MB. A write-only open
+  took 0.05 ms, and a second read-open took 0.08 ms. This is how an on-access antivirus scan of a modified file
+  behaves. In the test every append follows another writer's write, so every append pays the scan, inside the lock,
+  one writer after another. CPU load slows the scanner, which explains why failures need a busy machine.
+- **The lock is also unfair, as suspected.** The writer that releases the lock takes it back within about 0.1 ms,
+  before the sleeping writers poll again. One writer got up to 37 to 40 holds in a row, there were only 14 to 76
+  handoffs per 200 appends, and single waits reached 1 to 2 s in normal rounds and 29.9 s in the 50 s round, just
+  under the 30 s `LockTimeout`.
+- No round raised an exception. The slowest rounds would fail the test at its 45 s deadline or, when one writer is
+  starved as well, with `LockTimeout` at 30 s. 15 runs of the real test under load all passed, but 4 took 27 to
+  36 s.
+
+### Cause
+1. **Main cause:** `append` pays a read-open of the log (an antivirus scan on Windows) inside the lock, so writers
+   pay it one at a time. Under load that is about 350 ms per append.
+2. **Second cause:** the polling lock lets the releasing writer take the lock straight back (barging), so one waiter
+   can wait almost the whole run.
+
+### Fix
+1. **`eventlog.py`: read-open the log before taking the lock.** `append` opens the log read-only before it waits for
+   the lock, so the scan overlaps the wait instead of adding to every other writer's wait. Under the lock it reads
+   the tail through that handle, which sees other writers' appends (measured: 0.03 ms). If the log was created,
+   replaced or deleted in between (`os.stat(path)` and `os.fstat(handle)` give a different `st_dev`/`st_ino`, or no
+   file), it reopens under the lock, as today. Writing is unchanged: write-only append, one `os.write`, `fsync`.
+   There's no API or file-format change.
+2. **`_filelock.py`: a turn lock, so the next waiter is served before the releaser can return.** Every `acquire`
+   first takes the **turn lock**, a second lock on a sibling file (`R1.events.lock` → `R1.events.turn.lock`). Holding
+   it, it waits for the main lock, then lets the turn lock go. A writer that just released has to get the turn lock
+   too, and a waiter usually already holds it, so the waiter goes next. Waiters poll the turn lock at a jittered
+   interval (polling in lockstep would keep favouring the same writer). The one holder of the turn lock polls the
+   main lock fast. Only the main lock (the same file, the same `msvcrt.locking`/`fcntl.flock` calls, and `LOCK_BACKEND`
+   unchanged) gives mutual exclusion. The turn lock only decides who goes next. Both locks are OS locks held by an
+   open handle, so both are freed when their holder dies. The single timeout covers both waits.
+
+Options weighed:
+- **Blocking OS lock.** `msvcrt.LK_LOCK` is no better: the C runtime tries 10 times, 1 s apart, then fails, so it's
+  a coarser poll. A truly blocking `LockFileEx` (served in order by the kernel) would need overlapped handles and
+  cancellation through `ctypes`, and the backend would no longer be `msvcrt` (`LOCK_BACKEND`, AC6). On Linux a
+  blocking `flock` has no timeout except signals, which only work on the main thread, and `EventLog` is used from
+  threads. Rejected.
+- **Exponential backoff with jitter.** It makes long waiters poll less often, which makes starvation worse. Jitter
+  alone only breaks lockstep polling. Kept only as jitter inside the turn lock.
+- **Ticket or queue scheme** (a counter plus a lock per waiter so dead waiters can be skipped). It gives strict FIFO
+  order but needs a shared counter, detection of dead ticket holders and clean-up. That's too much machinery for
+  what it adds over the turn lock.
+- **Chosen: fix 1 plus the turn lock.** Fix 1 removes the main cause, and the turn lock removes barging, using only
+  the primitives already in use.
+
+### Files that change (reopen)
+- `src/ultron/store/eventlog.py`: `append` opens the read handle before the lock. `_last_seq` reads through a handle
+  instead of opening the path. There's a helper to check or reopen the handle under the lock.
+- `src/ultron/store/_filelock.py`: the turn lock and jittered polling. The docstring explains both.
+- `tests/store/test_filelock.py`: a waiter is served before the releaser takes the lock back, in-process and across
+  processes, repeated over many rounds, plus checks on the turn file's name and that a held turn lock times out
+  cleanly.
+- `tests/store/test_lock_stress.py` (new): (a) `append` never read-opens the log while holding the lock (deterministic,
+  both OSes). (b) A stress run: 6 writer processes loop on `append` alongside CPU-burning processes. Every append's
+  wait must stay bounded, and no writer may get more than a few holds in a row. Under 60 s.
+- `sdlc/v0/tasks/T05/plan.md`: this section.
+
+### Order of work
+1. Plan commit alone (`T05 reopen: plan (plan gate: auto)`).
+2. Tests first: run them on the current code and record the failures (red).
+3. Fix 1, then the turn lock (green). Then the original acceptance test 30 times in a row, timed, and under load.
+4. `make build`, `make lint`, `make test`, plus `mypy --platform linux src` for the `fcntl` branch.
+
+### Risks
+1. **A queued writer now holds a read handle on the log while it waits.** On Windows, a file open without
+   `FILE_SHARE_DELETE` can't be replaced or deleted (measured: `os.replace` fails with `PermissionError`). Before,
+   only writers holding the lock and brief lock-free readers held it open. T07, if it resets `events.jsonl` while it
+   holds the events lock, could be refused until queued writers time out. T07 has to retry on sharing violations
+   anyway (readers don't lock), but now has to expect queued writers too. Noted for T07, not solved here.
+2. **One more file per lock** (`*.turn.lock` beside each lock). It ends in `.lock`, so ignore rules for `*.lock`
+   cover it. Engine locks live in `.ultron/locks/`. The default lock beside the log gets a sibling there too.
+3. **The order isn't strict FIFO.** Waiters race for the turn lock, so the order among waiters is random. But each
+   hand-off goes to one of them rather than back to the releaser, so a long wait gets exponentially unlikely
+   instead of being the normal case for one writer.
+4. **The stress test must not be flaky itself.** Its limits are set well above what the fixed code shows, and it
+   checks hold order and the run length per writer rather than raw speed. The proof records the max duration of the
+   30 runs.
+5. **The scan isn't gone, only moved out of the lock.** Each append still pays it once, in parallel with the other
+   writers. Under heavy load a single append can still take a few hundred ms.
+
 ## Rerun after the tasks.md revision (2026-11-11)
 The owner sent the work back to decomposition (lesson L3). `tasks.md` now gives each criterion a `verify_with`, gives
 T05 `mcp: none` (plain file IO and locks), adds `ci` to AC2 and adds **AC6**: the concurrency and crash tests pass in
