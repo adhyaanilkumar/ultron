@@ -48,6 +48,13 @@ ATTEMPT_FINISHED = "attempt_finished"
 ESCALATION = "escalation"
 AGENT_CALL = "agent_call"
 CONFIG_SNAPSHOT = "config_snapshot"
+# call_for_edit (D27, spec §3, §12). None is an attempt; each is also the state machine's trigger (T08).
+ATTACHMENT_MISSING = "attachment_missing"
+"""The engine's check before filing found a ticket attachment missing: `failed`/`rejected` → `call_for_edit`."""
+EDIT_REQUESTED = "edit_requested"
+"""The user's question through `ultron_call_for_edit` (human-confirmed): `escalated` → `call_for_edit`."""
+EDIT_DONE = "edit_done"
+"""The task's developer agent added the missing file or attached its answer: `call_for_edit` → `escalated`."""
 
 GATE_DECISIONS = frozenset({"approve", "changes", "reject"})
 GATE_CHANNELS = frozenset({"form", "terminal", "auto"})

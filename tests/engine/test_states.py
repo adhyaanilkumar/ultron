@@ -18,7 +18,12 @@ from ultron.engine.states import (
     next_task_state,
     settle,
 )
-from ultron.store.events import Event
+from ultron.store.events import (
+    ATTACHMENT_MISSING,
+    EDIT_DONE,
+    EDIT_REQUESTED,
+    Event,
+)
 
 R = RequirementState
 T = TaskState
@@ -78,6 +83,11 @@ LEGAL_TASK: dict[tuple[TaskState, str], TaskState] = {
     (T.CODING, "agent_held"): T.HELD,
     (T.TESTING, "agent_held"): T.HELD,
     **{(state, "escalation"): T.ESCALATED for state in _UNFINISHED},
+    # D27: a missing attachment before filing, and the user's question after filing (spec §3, §12)
+    (T.FAILED, "attachment_missing"): T.CALL_FOR_EDIT,
+    (T.REJECTED, "attachment_missing"): T.CALL_FOR_EDIT,
+    (T.ESCALATED, "edit_requested"): T.CALL_FOR_EDIT,
+    (T.CALL_FOR_EDIT, "edit_done"): T.ESCALATED,
 }
 
 _EXTRA_TRIGGERS = (
@@ -588,8 +598,249 @@ def test_settled_requirement_takes_no_more_task_events() -> None:
         ([T.APPROVED, T.HELD], None),
         ([T.APPROVED, T.PENDING], None),
         ([T.ESCALATED, T.FAILED], None),
+        (
+            [T.APPROVED, T.CALL_FOR_EDIT],
+            None,
+        ),  # settle sees states only; the fold maps a filed one
         ([], None),
     ],
 )
 def test_settle(states: list[TaskState], expected: RequirementState | None) -> None:
     assert settle(states) is expected
+
+
+# --- AC6 (D27): call_for_edit -----------------------------------------------------------------------------------
+
+
+def test_call_for_edit_event_names() -> None:
+    assert (ATTACHMENT_MISSING, EDIT_REQUESTED, EDIT_DONE) == (
+        "attachment_missing",
+        "edit_requested",
+        "edit_done",
+    )
+    assert T.CALL_FOR_EDIT.value == "call_for_edit"
+
+
+def test_only_edit_done_leaves_call_for_edit() -> None:
+    allowed = {t for (s, t) in TASK_TRANSITIONS if s is T.CALL_FOR_EDIT}
+    assert allowed == {"edit_done"}
+    for trigger in ("escalation", "attempt_started", "agent_held", "attempt_failed"):
+        with pytest.raises(IllegalTransition):
+            next_task_state(T.CALL_FOR_EDIT, trigger)
+
+
+@pytest.mark.parametrize(
+    "state", [s for s in TaskState if s not in (T.FAILED, T.REJECTED)]
+)
+def test_attachment_missing_only_from_failed_or_rejected(state: TaskState) -> None:
+    with pytest.raises(IllegalTransition):
+        next_task_state(state, "attachment_missing")
+
+
+@pytest.mark.parametrize("state", [s for s in TaskState if s is not T.ESCALATED])
+def test_edit_requested_only_from_escalated(state: TaskState) -> None:
+    with pytest.raises(IllegalTransition):
+        next_task_state(state, "edit_requested")
+
+
+def _failed(log: Log, task: str, max_attempts: int) -> Log:
+    log.plan_approved(task)
+    for n in range(1, max_attempts + 1):
+        if n > 1:
+            log.add("plan_drafted", task).gate("plan", "approve", task)
+        log.attempt(task, n, "failed")
+    return log
+
+
+def _rejected(log: Log, task: str) -> Log:
+    log.plan_approved(task).attempt(task, 1, "passed")
+    return log.add("result_requested", task).gate("result", "reject", task)
+
+
+def test_failed_with_a_missing_attachment_passes_through_call_for_edit() -> None:
+    log = Log().to_in_progress({"T1": [], "T2": ["T1"]}, max_attempts=2)
+    _failed(log, "T1", 2).add(ATTACHMENT_MISSING, "T1", missing=["plan.md"])
+    snap = fold(log.events)
+    assert snap.tasks["T1"].state is T.CALL_FOR_EDIT
+    assert snap.tasks["T1"].attempt == 2
+    assert (
+        snap.tasks["T2"].state is T.PENDING
+    )  # not escalated yet, so nothing is blocked
+    assert snap.requirement is R.IN_PROGRESS
+    log.add(EDIT_DONE, "T1")
+    snap = fold(log.events)
+    assert snap.tasks["T1"].state is T.ESCALATED
+    assert snap.tasks["T1"].attempt == 2
+    assert snap.tasks["T2"].state is T.BLOCKED
+    assert snap.requirement is R.ESCALATED
+    log.add("escalation", "T1", reason="max_attempts", ticket="AD-500")  # the filing
+    assert fold(log.events) == snap
+
+
+def test_rejected_with_a_missing_attachment_passes_through_call_for_edit() -> None:
+    log = _rejected(Log().to_in_progress({"T1": [], "T2": []}), "T1")
+    log.add(ATTACHMENT_MISSING, "T1")
+    assert state_of(log, "T1") is T.CALL_FOR_EDIT
+    log.add(EDIT_DONE, "T1")
+    assert state_of(log, "T1") is T.ESCALATED
+    assert fold(log.events).tasks["T1"].attempt == 1
+
+
+def test_all_attachments_present_escalates_directly() -> None:
+    log = _rejected(Log().to_in_progress({"T1": []}), "T1")
+    log.add("escalation", "T1", reason="rejected")
+    assert state_of(log, "T1") is T.ESCALATED
+
+
+def test_a_first_escalation_cannot_skip_the_pending_edit() -> None:
+    log = _rejected(Log().to_in_progress({"T1": [], "T2": []}), "T1")
+    log.add(ATTACHMENT_MISSING, "T1").add("escalation", "T1", reason="rejected")
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+def test_call_for_edit_is_not_an_attempt() -> None:
+    log = _failed(Log().to_in_progress({"T1": []}, max_attempts=3), "T1", 3)
+    log.add(ATTACHMENT_MISSING, "T1").add(EDIT_DONE, "T1")
+    log.add("escalation", "T1", reason="max_attempts", ticket="AD-501")
+    for _ in range(3):
+        log.add(EDIT_REQUESTED, "T1", question="why?").add(EDIT_DONE, "T1")
+    status = fold(log.events).tasks["T1"]
+    assert (status.state, status.attempt, status.max_attempts) == (T.ESCALATED, 3, 3)
+    log.add(EDIT_REQUESTED, "T1", question="again?").add("attempt_started", "T1", 4)
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+@pytest.mark.parametrize(
+    ("type_", "data"),
+    [
+        ("attempt_started", {}),
+        ("coding_finished", {}),
+        ("attempt_finished", {"outcome": "failed"}),
+        ("agent.stopped", {"then": "retry"}),
+        ("agent.stopped", {"then": "hold"}),
+        ("agent.stopped", {"then": "escalate"}),
+        ("task_resumed", {}),
+        ("escalation", {}),
+        (ATTACHMENT_MISSING, {}),
+        (EDIT_REQUESTED, {}),
+    ],
+)
+def test_call_for_edit_before_filing_takes_only_edit_done(
+    type_: str, data: dict[str, Any]
+) -> None:
+    log = _rejected(Log().to_in_progress({"T1": [], "T2": []}), "T1")
+    log.add(ATTACHMENT_MISSING, "T1").add(type_, "T1", **data)
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+def test_escalated_to_call_for_edit_and_back_while_in_progress() -> None:
+    log = Log().to_in_progress({"T1": [], "T2": []}).escalated_after_reject("T1")
+    log.add(EDIT_REQUESTED, "T1", question="which config?")
+    snap = fold(log.events)
+    assert snap.tasks["T1"].state is T.CALL_FOR_EDIT
+    assert snap.requirement is R.IN_PROGRESS
+    log.add(EDIT_DONE, "T1", answer="answer.md")
+    assert state_of(log, "T1") is T.ESCALATED
+
+
+def test_edit_done_without_a_request_and_a_double_request_are_illegal() -> None:
+    log = Log().to_in_progress({"T1": []}).escalated_after_reject("T1")
+    log.add(EDIT_DONE, "T1")
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+    log = Log().to_in_progress({"T1": []}).escalated_after_reject("T1")
+    log.add(EDIT_REQUESTED, "T1").add(EDIT_REQUESTED, "T1")
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+@pytest.mark.parametrize("task", ["T1", "T3", "T9"])
+def test_call_for_edit_of_an_approved_blocked_or_unknown_task_is_illegal(
+    task: str,
+) -> None:
+    log = Log().to_in_progress({"T1": [], "T2": [], "T3": ["T2"]}).approved("T1")
+    log.escalated_after_reject("T2").add(EDIT_REQUESTED, task)
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+@pytest.mark.parametrize("outcome", [R.PARTIAL, R.ESCALATED])
+def test_call_for_edit_round_trips_after_the_requirement_settled(
+    outcome: RequirementState,
+) -> None:
+    log = Log().to_in_progress({"T1": [], "T2": []})
+    if outcome is R.PARTIAL:
+        log.approved("T1")
+    else:
+        log.escalated_after_reject("T1")
+    log.escalated_after_reject("T2")
+    settled = fold(log.events)
+    assert settled.requirement is outcome
+    log.add("escalation", "T2", reason="rejected", ticket="AD-502")
+    log.add(EDIT_REQUESTED, "T2", question="what failed?")
+    middle = fold(log.events)
+    assert middle.requirement is outcome
+    assert middle.tasks["T2"].state is T.CALL_FOR_EDIT
+    # a retried filing record arriving during the edit is a no-op
+    log.add("escalation", "T2", reason="rejected", ticket="AD-502", sprint="active")
+    assert fold(log.events) == middle
+    log.add(EDIT_DONE, "T2", answer="answer.md")
+    log.add(EDIT_REQUESTED, "T2", question="and the logs?").add(EDIT_DONE, "T2")
+    after = fold(log.events)
+    assert after == settled
+    assert fold(list(log.events)) == after
+    for n in range(len(log.events) + 1):
+        assert fold(log.events[:n]) == fold(log.events[:n])  # every prefix replays
+
+
+@pytest.mark.parametrize(
+    ("type_", "data"),
+    [
+        ("task_started", {}),
+        ("agent.stopped", {"then": "hold"}),
+        ("agent.stopped", {"then": "escalate"}),
+        ("attempt_started", {}),
+        (ATTACHMENT_MISSING, {}),
+        (EDIT_REQUESTED, {}),
+    ],
+)
+def test_other_events_on_a_filed_task_in_call_for_edit_are_illegal(
+    type_: str, data: dict[str, Any]
+) -> None:
+    log = Log().to_in_progress({"T1": []}).escalated_after_reject("T1")
+    assert fold(log.events).requirement is R.ESCALATED
+    log.add(EDIT_REQUESTED, "T1").add(type_, "T1", **data)
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
+
+
+def test_a_filed_task_in_call_for_edit_counts_as_escalated_for_settling() -> None:
+    log = Log().to_in_progress({"T1": [], "T2": []}).escalated_after_reject("T1")
+    log.add(EDIT_REQUESTED, "T1", question="?")
+    log.approved("T2")
+    settled = fold(log.events)
+    assert settled.requirement is R.PARTIAL
+    assert settled.tasks["T1"].state is T.CALL_FOR_EDIT
+    log.add(EDIT_DONE, "T1")
+    snap = fold(log.events)
+    assert snap.requirement is R.PARTIAL
+    assert snap.tasks["T1"].state is T.ESCALATED
+
+
+def test_settling_does_not_depend_on_when_the_question_was_asked() -> None:
+    early = Log().to_in_progress({"T1": [], "T2": []}).escalated_after_reject("T1")
+    early.add(EDIT_REQUESTED, "T1").approved("T2").add(EDIT_DONE, "T1")
+    late = Log().to_in_progress({"T1": [], "T2": []}).escalated_after_reject("T1")
+    late.approved("T2").add(EDIT_REQUESTED, "T1").add(EDIT_DONE, "T1")
+    assert fold(early.events) == fold(late.events)
+
+
+def test_a_pre_filing_call_for_edit_task_is_unfinished_for_settling() -> None:
+    log = _rejected(Log().to_in_progress({"T1": [], "T2": []}), "T1")
+    log.add(ATTACHMENT_MISSING, "T1").approved("T2")
+    assert fold(log.events).requirement is R.IN_PROGRESS
+    log.add(EDIT_DONE, "T1")
+    assert fold(log.events).requirement is R.PARTIAL

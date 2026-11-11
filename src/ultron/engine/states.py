@@ -12,8 +12,19 @@ A **trigger** is a string. Most are the event type (`plan_drafted`). A gate deci
 - `agent_held`: `agent.stopped` with `then=hold` (the default). `task_resumed` returns to where the task was held;
 - `dependency_escalated`: derived, a `pending` task behind an `escalated` or `blocked` task becomes `blocked`.
 
+`call_for_edit` (D27, spec §3, §12) is never an attempt and never changes the attempt count:
+
+- `attachment_missing`: the engine's check before filing found an attachment missing, `failed`/`rejected` →
+  `call_for_edit`; then `edit_done` (the developer agent added it) → `escalated`;
+- `edit_requested`: after filing, the user's question, `escalated` → `call_for_edit`; then `edit_done` (the answer is
+  attached) → `escalated`.
+
+A task is **filed** when it is `escalated`, or in `call_for_edit` entered from `escalated`. A filed task counts as
+`escalated` for blocking and settling, so the requirement's outcome does not depend on when a question is asked.
+
 Requirements settle by themselves: `all_approved`, `partly_approved` or `none_approved`. After that, task events
-are illegal, except a repeated `escalation` record for an already escalated task (the Jira key, spec §12): a no-op.
+are illegal, except on a filed task: a repeated `escalation` record (the Jira key, a retried filing; spec §12) is a
+no-op, and `edit_requested` / `edit_done` round trips are applied without unsettling the requirement.
 Event types outside this vocabulary (`intake`, `agent_call`, `config_snapshot`, merge and deploy gates) are ignored.
 """
 
@@ -26,8 +37,11 @@ from types import MappingProxyType
 
 from ultron.config.defaults import MAX_ATTEMPTS_DEFAULT
 from ultron.store.events import (
+    ATTACHMENT_MISSING,
     ATTEMPT_FINISHED,
     ATTEMPT_STARTED,
+    EDIT_DONE,
+    EDIT_REQUESTED,
     ESCALATION,
     GATE_DECISION,
     Event,
@@ -68,6 +82,7 @@ class TaskState(StrEnum):
     HELD = "held"
     BLOCKED = "blocked"
     ESCALATED = "escalated"
+    CALL_FOR_EDIT = "call_for_edit"
 
 
 R = RequirementState
@@ -141,6 +156,11 @@ TASK_TRANSITIONS: Mapping[tuple[TaskState, str], TaskState] = MappingProxyType(
         (T.TESTING, "agent_held"): T.HELD,
         # rejected and failed lead to escalated; so do a stop with then=escalate (§9.1) and the cap (FR18)
         **{(state, "escalation"): T.ESCALATED for state in _ESCALATABLE},
+        # D27: an attachment missing before filing, or the user's question after it; never an attempt
+        (T.FAILED, ATTACHMENT_MISSING): T.CALL_FOR_EDIT,
+        (T.REJECTED, ATTACHMENT_MISSING): T.CALL_FOR_EDIT,
+        (T.ESCALATED, EDIT_REQUESTED): T.CALL_FOR_EDIT,
+        (T.CALL_FOR_EDIT, EDIT_DONE): T.ESCALATED,
     }
 )
 
@@ -211,6 +231,20 @@ class TaskStatus:
     max_attempts: int
     depends_on: tuple[str, ...] = ()
     held_from: TaskState | None = None
+    edit_from: TaskState | None = None
+    """In `call_for_edit`: the state it was entered from (`failed`, `rejected` or `escalated`)."""
+
+    @property
+    def filed(self) -> bool:
+        """Escalated, or in `call_for_edit` after filing (the user's question, D27)."""
+        return self.state is T.ESCALATED or (
+            self.state is T.CALL_FOR_EDIT and self.edit_from is T.ESCALATED
+        )
+
+    @property
+    def settled_state(self) -> TaskState:
+        """The state blocking and settling see: a filed task counts as `escalated`."""
+        return T.ESCALATED if self.filed else self.state
 
 
 @dataclass(frozen=True)
@@ -244,9 +278,14 @@ _TASK_TYPES = frozenset(
         ATTEMPT_STARTED,
         ATTEMPT_FINISHED,
         ESCALATION,
+        ATTACHMENT_MISSING,
+        EDIT_REQUESTED,
+        EDIT_DONE,
     }
 )
 _TASK_GATES = frozenset({"plan", "result"})
+_AFTER_FILING_TYPES = frozenset({ESCALATION, EDIT_REQUESTED, EDIT_DONE})
+"""Events a filed task takes whatever the requirement's state (spec §12, D27)."""
 
 
 def fold(events: Iterable[Event]) -> Snapshot:
@@ -299,7 +338,7 @@ def _settle(
         changed = False
         for name, status in tasks.items():
             if status.state is T.PENDING and any(
-                dep in tasks and tasks[dep].state in (T.ESCALATED, T.BLOCKED)
+                dep in tasks and tasks[dep].settled_state in (T.ESCALATED, T.BLOCKED)
                 for dep in status.depends_on
             ):
                 tasks[name] = replace(
@@ -308,7 +347,7 @@ def _settle(
                 )
                 changed = True
     if requirement is R.IN_PROGRESS:
-        outcome = settle(s.state for s in tasks.values())
+        outcome = settle(s.settled_state for s in tasks.values())
         if outcome is not None:
             return outcome
     return requirement
@@ -329,9 +368,16 @@ def _apply_task(
         _create_task(event, name, requirement, tasks)
         return
     status = tasks.get(name)
-    if event.type == ESCALATION and status is not None and status.state is T.ESCALATED:
-        # A later record of the same escalation (the Jira key, its sprint placement, a retried filing; spec §12).
-        # It usually arrives after the requirement settled, so it is a no-op whatever the requirement's state.
+    if status is not None and status.filed and event.type in _AFTER_FILING_TYPES:
+        # These usually arrive after the requirement settled, so they apply whatever the requirement's state.
+        if event.type == ESCALATION:
+            # A later record of the same escalation (the Jira key, its sprint placement, a retried filing; spec
+            # §12): a no-op, also while the task is in call_for_edit.
+            return
+        new_state = next_task_state(status.state, event.type)
+        tasks[name] = replace(
+            status, state=new_state, edit_from=_edit_from(status, new_state)
+        )
         return
     if requirement is not R.IN_PROGRESS:
         raise IllegalTransition(
@@ -381,7 +427,20 @@ def _apply_task(
         _check_dependencies(name, status, tasks)
     if new_state is not T.HELD:
         held_from = None
-    tasks[name] = replace(status, state=new_state, attempt=attempt, held_from=held_from)
+    tasks[name] = replace(
+        status,
+        state=new_state,
+        attempt=attempt,
+        held_from=held_from,
+        edit_from=_edit_from(status, new_state),
+    )
+
+
+def _edit_from(status: TaskStatus, new_state: TaskState) -> TaskState | None:
+    """Where a task entered `call_for_edit` from; kept while it stays there, cleared when it leaves."""
+    if new_state is not T.CALL_FOR_EDIT:
+        return None
+    return status.edit_from if status.state is T.CALL_FOR_EDIT else status.state
 
 
 def _failure(status: TaskStatus) -> str:
