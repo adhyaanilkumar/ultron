@@ -48,6 +48,10 @@ class CallContext:
     attempt: int | None = None
     run: str | None = None
     """The evaluation run this requirement belongs to, if any."""
+    prompt_version: str | None = None
+    """The prompt template version (T18), written into the `agent_call` event when set."""
+    context_files: tuple[Mapping[str, str], ...] = ()
+    """Path and SHA-256 of each file in the prompt (T18), written into the event when not empty."""
 
 
 def _sha(text: str) -> str:
@@ -119,29 +123,32 @@ class LoggingRunner:
             context, role, prompt, limits, result, activity, cost
         )
         self._append_activity(context, role, activity)
-        self._log.append(
-            ev.agent_call(
-                context.requirement,
-                role=role,
-                model=result.model,
-                effort=result.effort,
-                duration_ms=result.duration_ms,
-                tokens=result.usage.as_tokens(),
-                cost_usd=cost,
-                transcript=rel,
-                prompt_sha256=_sha(prompt),
-                result_sha256=_sha(
-                    json.dumps(
-                        {"output": result.output, "data": result.data},
-                        sort_keys=True,
-                        default=str,
-                    )
-                ),
-                task=context.task,
-                attempt=context.attempt,
-                stop_reason=result.stop_reason.value,
-            )
+        event = ev.agent_call(
+            context.requirement,
+            role=role,
+            model=result.model,
+            effort=result.effort,
+            duration_ms=result.duration_ms,
+            tokens=result.usage.as_tokens(),
+            cost_usd=cost,
+            transcript=rel,
+            prompt_sha256=_sha(prompt),
+            result_sha256=_sha(
+                json.dumps(
+                    {"output": result.output, "data": result.data},
+                    sort_keys=True,
+                    default=str,
+                )
+            ),
+            task=context.task,
+            attempt=context.attempt,
+            stop_reason=result.stop_reason.value,
         )
+        if context.prompt_version is not None:
+            event.data["prompt_version"] = context.prompt_version
+        if context.context_files:
+            event.data["context_files"] = [dict(f) for f in context.context_files]
+        self._log.append(event)
         return result
 
     def _write_transcript(
