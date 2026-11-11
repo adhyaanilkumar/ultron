@@ -95,3 +95,5 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | escalation | T06 → AD-437 | adhyaanilkumar | escalate | owner chose escalation over a 4th attempt on Fable; Feature under AD-378, active sprint SP-105, 5 story points; T07, T44 and their dependents blocked |
 | 2026-11-11 | result | T08 D27 rerun | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T08 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | spec | D28 intent gate allows changes | adhyaanilkumar | approve | T10 AC6 conflicted with T08's strict §3 reading; owner chose to allow intent → changes → intake_drafting |
+| 2026-11-11 | sent back | T08 (merged; reopens) | engine | rerun | add the D28 transition; owner-approved update of T08's strict acceptance test; not counted |
