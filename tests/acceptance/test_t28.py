@@ -2054,12 +2054,18 @@ def test_attempt3_prune_on_a_fresh_repo_creates_only_the_mark_and_the_lock(
     before = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")}
     assert prune(tmp_path, tmp_path / ".ultron") == 0
     after = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")}
+    lock = Path(".ultron/locks/activity.lock")
+    turn_lock = lock.with_name(
+        lock.stem + ".turn" + lock.suffix
+    ).as_posix()  # T05's turn lock, same lock
     assert after - before == {
         ".ultron",
         ".ultron/activity.seq",
         ".ultron/locks",
-        ".ultron/locks/activity.lock",
+        lock.as_posix(),
+        turn_lock,
     }
+    assert turn_lock == ".ultron/locks/activity.turn.lock"
     assert _mark(tmp_path / ".ultron") == 0
     assert not (tmp_path / ".ultron" / "activity.jsonl").exists()
     assert append_activity(tmp_path / ".ultron", [row(text="first")]) == 1
