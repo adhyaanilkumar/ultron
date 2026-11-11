@@ -58,7 +58,7 @@ For every task that needs more than one attempt: what each attempt did different
 | 1 | R3 | First implementation | Failed (5): work folder could enclose the repo; bare `git config` write; inherited `GIT_DIR`/`GIT_INDEX_FILE` |
 | 2 | R4 | Revised plan: stricter merge rule, `WorkFolderOverlapsRepo`, checked command allowlist, sanitised git env, diff on a temp index | Tester stopped mid-run (owner sent tasks back); not counted |
 | 2 (rerun) | R4 | Identity (`samefile`) checks against path aliases of the user's checkout; `ultron-worktree` marker required for commit/remove; refuses tampered `.git` and off-branch worktrees; refuses all-zero sha | Failed (3 tests): merge into a symbolic-ref alias moved a checked-out branch; marker-write failure left the branch behind |
-| 3 | R5 | Resolve refs to their final target before the checked-out-branch check; cleanup removes only the branch it just created via `update-ref -d <ref> <sha>` | In progress |
+| 3 | R5 | Resolve refs to their final target before the checked-out-branch check; cleanup removes only the branch it just created via `update-ref -d <ref> <sha>`. Found and closed 3 more holes of the same kind: case aliases (`MAIN` = `main` on Windows), dangling symrefs, rebase/bisect in progress. One guard before every ref write; `update-ref --no-deref` only; branch created before the worktree. Interrupted once by the usage limit (resumed, not counted) | Developer green (481 passed; all 243 T06 acceptance tests); in testing |
 
 ### T08 · State machines
 | Attempt | Rung | What was different | Result |
