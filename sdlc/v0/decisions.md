@@ -172,7 +172,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R2 | First implementation; MCP Inspector used while building | Failed (5 tests): hostile config_snapshot passed on unlabelled; repo text in errors unlabelled; C1 controls kept; stdout fd 1 not protected |
 | 2 | R3 | Validate snapshot values (types and ranges) and label anything repo-derived, errors included; strip all C1 controls; move fd 1 to stderr and write the protocol to a duplicate; children get stdin=DEVNULL; 256 KB caps | Failed (1 test): unterminated 7-bit OSC swallows the rest of a file; all security and protocol checks passed |
-| 3 | R4 | One rule for every string escape sequence (7- and 8-bit): stop at BEL/ST/CAN/SUB/ESC/C1/end of line; other C0 and DEL become U+FFFD | Developer green (4825 passed, test_t36.py 81 + 1 platform skip); in testing |
+| 3 | R4 | One rule for every string escape sequence (7- and 8-bit): stop at BEL/ST/CAN/SUB/ESC/C1/end of line; other C0 and DEL become U+FFFD | Failed (3 tests): open sequence in repo text eats ultron's own text; C1 breaks monitor JSON; quadratic tag check (pre-existing, T28). Escalated AD-439 |
 | 2026-11-11 | result | T10 attempt 3 | adhyaanilkumar | approve | |
 | 2026-11-11 | result | T05 reopen | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T10 into v0-design | adhyaanilkumar | approve | |
@@ -190,3 +190,5 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | attempt | T12 attempt 1 (R3) | engine | fail | 19 failed: history records the start rung, not the capped rung that ran; `..`, `/./`, `//` paths not normalised for tests_modified; `for_task` drops the folded attempt count, so a restart grants extra attempts; climb to R4 |
 | 2026-11-11 | attempt | T36 attempt 2 (R3) | engine | fail | 1 failed, 4192 passed: an unterminated 7-bit OSC (ESC ]) deletes the rest of a file in results (content loss, not security); climb to R4 for attempt 3 (last) |
 | 2026-11-11 | attempt | T12 attempt 2 (R4) | engine | fail | 3 failed, 6911 passed: AC4 fingerprints split on random ids (quoted hex starting with a letter; unquoted UUIDs), so the same failure twice isn't recognised; climb to R5 for attempt 3 (last) |
+| 2026-11-11 | attempt | T36 attempt 3 (R4, last) | engine | fail | 3 failed, 4835 passed: an open escape sequence in repo text cuts ultron's own text on that line; 8-bit C1 breaks monitor JSON; T28's tag check is quadratic on long whitespace; max_attempts reached |
+| 2026-11-11 | escalation | T36 → AD-439 | engine | escalate | automatic; Feature under AD-378, sprint SP-105, 3 story points |

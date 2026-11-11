@@ -4491,7 +4491,7 @@
       },
       "total": 5,
       "rung": "R2",
-      "jira": "",
+      "jira": "AD-439",
       "mcp": {
         "servers": [
           {

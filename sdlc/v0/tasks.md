@@ -1286,7 +1286,7 @@ Spec §18, D14. Render the 20×28 mascot from the spec's cell map in 14 lines of
 - type: feature
 - depends_on: T02, T09, T28
 - ships_independently: yes
-- jira:
+- jira: AD-439 (escalated 2026-11-11: 3 attempts failed, 3 story points)
 - rung: R2 (total 5)
 - mcp: MCP Inspector (not connected) — ₹0 via `npx`; shows `ultron mcp`'s tools, schemas and JSON-RPC log while building; the criteria still use ultron's scripted client (Cat 4)
 
