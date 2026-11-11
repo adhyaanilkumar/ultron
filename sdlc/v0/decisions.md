@@ -124,7 +124,7 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R3 | First implementation; AC6 intent finished after D28 | Failed (4 tests): `config_change` could make merge/deploy/rollback read as auto; escalation-gate decision accepted for a task not failed/rejected |
-| 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected tasks | In progress |
+| 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected/call_for_edit/escalated tasks, judged by current state | Developer green (3600 passed, all of test_t10.py); in testing |
 | 2026-11-11 | attempt | T28 attempt 1 (R1) | engine | fail | 4 failed, 3143 passed: prune crashes against an open reader on Windows; append after a torn tail loses a row; a new attempt shows the old attempt's activity; </untrusted-data> in content closes the wrapper; climb to R2 |
 
 ### T28 · Activity stream and monitor
