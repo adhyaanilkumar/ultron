@@ -62,3 +62,26 @@ def test_partial_last_line_is_ignored(tmp_path: Path) -> None:
     with (tmp_path / "activity.jsonl").open("ab") as fh:
         fh.write(b'{"n": 2, "kind": "re')
     assert [r["n"] for r in follow(tmp_path, 0)["activity"]] == [1]
+
+
+def test_append_after_a_torn_tail_keeps_the_new_rows(tmp_path: Path) -> None:
+    append_activity(tmp_path, [{"requirement": "R", "kind": "read", "text": "a"}])
+    path = tmp_path / "activity.jsonl"
+    path.write_bytes(
+        path.read_bytes() + b'{"requirement": "R", "ki'
+    )  # a writer died mid-line
+    append_activity(
+        tmp_path,
+        [
+            {"requirement": "R", "kind": "read", "text": "b"},
+            {"requirement": "R", "kind": "read", "text": "c"},
+        ],
+    )
+    got = follow(tmp_path, 0)["activity"]
+    assert [r["text"] for r in got] == ["a", "b", "c"]
+    assert [r["n"] for r in got] == [1, 2, 3]
+    # a torn tail that is a whole JSON row without its newline is not numbered twice
+    path.write_bytes(path.read_bytes() + b'{"requirement": "R", "n": 4, "text": "d"}')
+    append_activity(tmp_path, [{"requirement": "R", "kind": "read", "text": "e"}])
+    ns = [r["n"] for r in follow(tmp_path, 0)["activity"]]
+    assert ns == sorted(set(ns))

@@ -25,6 +25,7 @@ __all__ = ["append_activity", "prune", "read_activity"]
 ACTIVITY_FILE = "activity.jsonl"
 SEQ_FILE = "activity.seq"
 RETENTION = timedelta(days=7)
+_RETRIES = 150  # about 10 s of backoff in all
 _FINISHED = {RequirementState.COMPLETE, RequirementState.PARTIAL}
 
 
@@ -47,16 +48,54 @@ def _parse(data: bytes) -> list[dict[str, Any]]:
 
 
 def _read_bytes(path: Path) -> bytes:
-    for attempt in range(20):
+    for attempt in range(_RETRIES):
         try:
             return path.read_bytes()
         except FileNotFoundError:
             return b""
         except OSError:  # replaced by a prune at this moment (Windows)
-            if attempt == 19:
+            if attempt == _RETRIES - 1:
                 raise
-            time.sleep(0.01)
+            time.sleep(_pause(attempt))
     return b""
+
+
+def _pause(attempt: int) -> float:
+    """Backoff for retries on a busy file: 10 ms growing to 100 ms."""
+    return min(0.1, 0.01 * (attempt + 1))
+
+
+def _replace(tmp: Path, target: Path) -> None:
+    """`os.replace`, retried while a reader holds the target open (Windows denies the replace then)."""
+    for attempt in range(_RETRIES):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError:
+            if attempt == _RETRIES - 1:
+                raise
+            time.sleep(_pause(attempt))
+
+
+def _mend_tail(path: Path) -> None:
+    """Under the lock: end the file with a newline, so a writer that died mid-line cannot swallow the next row.
+
+    The torn fragment becomes one garbage line, which readers skip."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                return
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) == b"\n":
+                return
+    except OSError:
+        return
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
+    try:
+        os.write(fd, b"\n")
+    finally:
+        os.close(fd)
 
 
 def _high_water(ultron_dir: Path) -> int:
@@ -76,6 +115,7 @@ def append_activity(ultron_dir: Path | str, rows: Sequence[Mapping[str, Any]]) -
         return _high_water(base)
     base.mkdir(parents=True, exist_ok=True)
     with _lock(base):
+        _mend_tail(base / ACTIVITY_FILE)
         n = _high_water(base)
         lines: list[str] = []
         for row in rows:
@@ -146,5 +186,5 @@ def prune(
             text = "".join(json.dumps(r) + "\n" for r in keep)
             tmp = base / (ACTIVITY_FILE + ".tmp")
             tmp.write_bytes(text.encode("utf-8"))
-            os.replace(tmp, base / ACTIVITY_FILE)
+            _replace(tmp, base / ACTIVITY_FILE)
     return removed
