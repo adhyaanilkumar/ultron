@@ -76,7 +76,7 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R3 | First implementation | Failed (2 tests): auth header reachable via `JiraUnreachable.__context__`; missing attachment after create raised without `issue_key` |
-| 2 | R4 | Raise outside the `except` so no exception keeps the httpx error; check attachments before creating; wrap post-create failures with `issue_key`; kanban board treated as backlog | In progress |
+| 2 | R4 | Raise outside the `except` so no exception keeps the httpx error; check attachments before creating; wrap post-create failures with `issue_key`; kanban board treated as backlog | Developer green (800 passed); in testing. Pre-create attachment check not added: an acceptance test requires `issue_key` for a file missing from the start |
 
 ### T35 · Mascot
 | Attempt | Rung | What was different | Result |
