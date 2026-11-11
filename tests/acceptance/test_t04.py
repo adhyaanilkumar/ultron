@@ -332,3 +332,34 @@ def test_misc_other_validation() -> None:
         build({**MIN, "ladder": {"max_rung": "R9"}})
     c = build({**MIN, "ladder": {"max_rung": "R3"}, "intake_research": "off"}).config
     assert c.ladder.max_rung == "R3" and c.intake_research == "off"
+
+
+# ---- AC5: suggested path text ----
+@pytest.mark.parametrize(
+    ("key", "suggest"),
+    [("work_folder", r"C:\git\.ultron-work"), ("ultron_home", r"C:\git\.ultron")],
+)
+def test_ac5_error_suggests_path_without_spaces(key: str, suggest: str) -> None:
+    with pytest.raises(ValidationError) as ei:
+        build({**MIN, "paths": {key: r"C:\Users\Anil Kumar ML\x"}})
+    msg = str(ei.value)
+    assert "without spaces" in msg
+    assert suggest in msg
+
+
+# ---- AC6: warning object carries recordable fields ----
+def test_ac6_warning_object_fields_for_each_default_human_gate() -> None:
+    for gate in ["intent", "spec", "plan", "result"]:
+        (w,) = build({**MIN, "gates": {gate: "auto"}}).warnings
+        assert (w.gate, w.from_value, w.to_value) == (gate, "human", "auto")
+        assert gate in w.message
+
+
+# ---- AC3: rollback-only with TOML file ----
+def test_ac3_toml_file_variants(tmp_path: Path) -> None:
+    f = tmp_path / "a.toml"
+    f.write_text('[commands]\ntest = "t"\ndeploy = "./d"\n')
+    with pytest.raises(ValidationError):
+        load_config(f, windows=True)
+    f.write_text('[commands]\ntest = "t"\nrollback = "./r"\n')
+    assert load_config(f, windows=True).config.commands.rollback == "./r"
