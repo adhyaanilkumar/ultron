@@ -54,7 +54,7 @@ Files that change: this `plan.md` only. If lint or build fails, the fix goes in 
 Proof, per criterion, using its `verify_with`:
 | AC | verify_with | Proof on the attempt-1 code |
 |---|---|---|
-| AC1 bump resets lower parts | `pytest` on `tests/engine/test_version.py` | `test_bump` cases, and `test_acceptance` AC1 table |
+| AC1 bump resets lower parts | `pytest` on `tests/engine/test_version.py` | `test_bump` cases, and `tests/acceptance/test_t14.py::test_ac1_bump` |
 | AC2 no releases gives `0.0.0` | `pytest` on `tests/engine/test_version.py` | `test_current_version_empty_is_0_0_0` |
 | AC3 `release_bump` takes largest | `pytest` on `tests/engine/test_version.py` | `test_release_bump_takes_largest` |
 | AC4 maintenance default `patch` | `pytest` on `tests/engine/test_version.py` | `test_default_bump_maintenance_is_patch` |
