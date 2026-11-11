@@ -261,3 +261,32 @@ def test_ac2_ac3_ac4_have_slots_in_findings() -> None:
         "screenshot",
     ):
         assert needle in text, needle
+
+
+# Rerun additions (R1): README gives the owner commands and screenshot instructions
+def test_readme_screenshot_and_observation_instructions() -> None:
+    text = (HOST / "README.md").read_text(encoding="utf-8").lower()
+    for needle in (
+        "screenshot",
+        "sdlc/v0/evidence",
+        "progress",
+        "resource-update",
+        "pending",
+    ):
+        assert needle in text, needle
+
+
+def test_ac5_exactly_one_row_per_question() -> None:
+    rows = _host_rows()[1:]
+    assert len(rows) == 4
+    questions = [r[0].lower() for r in rows]
+    for key in ("elicitation", "notification", "`!`", "version"):
+        assert sum(key in q for q in questions) == 1, key
+
+
+def test_ac6_screenshot_paths_named_in_host_section_exist() -> None:
+    # Vacuous while cells are PENDING (owner fills them); checks paths once filled.
+    section = FINDINGS.read_text(encoding="utf-8").split("## Host", 1)[1]
+    section = re.split(r"^## ", section, flags=re.MULTILINE)[0]
+    for m in re.findall(r"[\w./\\-]+\.(?:png|jpg|jpeg|gif|webp)", section):
+        assert (ROOT / m).is_file(), m
