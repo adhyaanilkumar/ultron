@@ -105,3 +105,5 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | merge | v0/T15 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T25 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | flaky | test_t05 lock test, test_t01 make-lint test | engine | note | each failed once under load in full runs and passed alone and on rerun (lesson L10) |
+| 2026-11-11 | result | T08 D28 | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T08 (D28) into v0-design | adhyaanilkumar | approve | |
