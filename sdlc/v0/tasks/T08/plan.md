@@ -151,3 +151,55 @@ it is updated.
 
 **Proof.** `pytest tests/engine/test_states.py`, then `make build`, `make lint`, `make test` (only the acceptance test
 above fails).
+
+## Reopened for D29 (R3)
+Author: developer agent (R3, owner send-back, not a counted attempt). D29 (spec §3, T08 AC7) settles the
+`call_for_edit` edge cases the D27 rerun left open. The D27/D28 code stays; this adds to it.
+
+**Names (new).**
+- Event type `FILED_WITH_MISSING = "filed_with_missing"` in `store/events.py` (additive), the "file anyway" record:
+  `call_for_edit` → `escalated`, the ticket noting the missing file. Data `reason` is `"cap"`
+  (`FILED_REASON_CAP`, the spending cap was reached during the edit) or `"edit_rounds"` (`FILED_REASON_EDIT_ROUNDS`,
+  still missing after the last round); `missing` lists the files. Its trigger is the event type.
+- Derived trigger `EDIT_STOPPED = "edit_stopped"` (in `states.py`): `agent.stopped` (any `then`) while in
+  `call_for_edit` → back to `edit_from`, like `task_resumed` → `held_from`. Never an attempt.
+- `EDIT_ROUNDS_MAX = 2` (in `states.py`) and `TaskStatus.edit_round`: the `call_for_edit` round, 1 on entry, 2 after a
+  second `attachment_missing`, 0 outside `call_for_edit`.
+
+**Table.**
+- `attachment_missing` → `call_for_edit` from every escalatable state (`_ESCALATABLE`: failed, rejected, held, every
+  unfinished state at the cap, the agent states for a stop with `then=escalate`), not only failed/rejected.
+- `call_for_edit` + `attachment_missing` → `call_for_edit` (second round).
+- `call_for_edit` + `filed_with_missing` → `escalated`.
+- `edit_stopped` is resolved in `next_task_state(..., edit_from=...)`, legal only from `call_for_edit` with an origin.
+
+**Fold.**
+- A second `attachment_missing` is legal only before filing and while `edit_round < EDIT_ROUNDS_MAX`; a third is
+  illegal (the engine records `filed_with_missing`, reason `edit_rounds`). `filed_with_missing` is legal only before
+  filing; reason `edit_rounds` needs `edit_round == EDIT_ROUNDS_MAX`; reason `cap` is legal in any round; any other
+  reason is illegal.
+- `agent.stopped` in `call_for_edit` returns to `edit_from` and resets the round; attempt count unchanged. On a filed
+  task (`edit_from` escalated) it applies whatever the requirement's state, like `edit_done`, so replay after
+  settling still works. `held_from` is kept while a task entered `call_for_edit` from `held`, so a stop back to
+  `held` can still resume.
+- Everything else from D27/D28 is unchanged: filed tasks count as escalated, a repeated `escalation` is a no-op,
+  `escalation` still cannot leave a pre-filing `call_for_edit` (the engine records `filed_with_missing`).
+
+**Files.** `src/ultron/engine/states.py`, `src/ultron/store/events.py` (constants only), `tests/engine/test_states.py`.
+Unit tests that pinned the D27-only rules (only `edit_done` leaves `call_for_edit`; `attachment_missing` only from
+failed/rejected; a stop or second `attachment_missing` in `call_for_edit` illegal) are updated to D29. Acceptance
+tests untouched.
+
+**Order.** Unit tests first (red): table rows; `edit_stopped` resolution; fold for each D29 path (stop pre- and
+post-filing, after settling; attachment check from held, coding and a stop with `then=escalate`; two rounds then
+`filed_with_missing`; cap in round 1 and 2; illegal third round, early `edit_rounds` filing, unknown reason, filing a
+filed task); replay at every prefix. Then code (green), then `make build`, `make lint`, `make test`.
+
+**Risks.** The acceptance tests from D27 pin the old rules (`attachment_missing` only from failed/rejected,
+`(call_for_edit, attachment_missing)` illegal, the exact `LEGAL_TASK` table); they will fail until the testing agent
+updates them for D29. A stop returning to an agent state (`coding` after a cap check) leaves the engine to escalate
+again; that loop is bounded by human stops. `edit_round` is a new `TaskStatus` field (default 0), so snapshots built
+by hand elsewhere still compare equal outside `call_for_edit`.
+
+**Proof (AC7).** `pytest tests/engine/test_states.py`, then `make build`, `make lint`, `make test` (only D27-pinned
+acceptance tests fail, listed in the report).
