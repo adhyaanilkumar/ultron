@@ -37,6 +37,7 @@ LEGAL_REQUIREMENT: dict[tuple[RequirementState, str], RequirementState] = {
     (R.SUBMITTED, "spec_started"): R.SPEC_DRAFTING,
     (R.INTAKE_DRAFTING, "intent_drafted"): R.AWAITING_INTENT,
     (R.AWAITING_INTENT, "intent.approve"): R.SPEC_DRAFTING,
+    (R.AWAITING_INTENT, "intent.changes"): R.INTAKE_DRAFTING,  # D28
     (R.SPEC_DRAFTING, "spec_drafted"): R.AWAITING_SPEC,
     (R.AWAITING_SPEC, "spec.changes"): R.SPEC_DRAFTING,
     (R.AWAITING_SPEC, "spec.approve"): R.SPEC_APPROVED,
@@ -243,6 +244,28 @@ def test_fold_requirement_path_with_intake_and_changes() -> None:
     assert fold(log.events).requirement is R.SPEC_APPROVED
     log.add("decomposition_started")
     assert fold(log.events).requirement is R.DECOMPOSING
+
+
+def test_fold_intent_changes_go_back_to_intake_and_redraft_returns_to_the_gate() -> (
+    None
+):
+    """D28: request changes at the intent gate sends the draft back to the intake agent."""
+    log = Log().add("intake_started").add("intent_drafted")
+    log.add(
+        "gate_decision", gate="intent", decision="changes", comment="name the users"
+    )
+    assert fold(log.events).requirement is R.INTAKE_DRAFTING
+    log.add("intent_drafted")
+    assert fold(log.events).requirement is R.AWAITING_INTENT
+    log.gate("intent", "changes").add("intent_drafted").gate("intent", "approve")
+    assert fold(log.events).requirement is R.SPEC_DRAFTING
+
+
+@pytest.mark.parametrize("decision", ["changes", "approve"])
+def test_fold_intent_decision_without_a_draft_is_illegal(decision: str) -> None:
+    log = Log().add("intake_started").gate("intent", decision)
+    with pytest.raises(IllegalTransition):
+        fold(log.events)
 
 
 def test_fold_template_intent_and_auto_tasks_gate_skip_the_bracketed_steps() -> None:

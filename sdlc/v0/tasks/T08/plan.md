@@ -131,3 +131,23 @@ fail are listed in the report for the testing agent.
 
 **Proof (AC6).** `pytest tests/engine/test_states.py` (new table and fold tests), `pytest tests/acceptance/test_t08.py`,
 then `make build`, `make lint`, `make test`.
+
+## Reopened for D28 (R3)
+
+**Change.** D28 (spec §3): the intent gate offers Request changes, like spec and plan. One new row in the requirement
+table: `awaiting_intent` + `intent.changes` → `intake_drafting`. The comment goes to the intake agent (engine side,
+not this task). The fold needs no change: a gate decision on `intent` already maps to `intent.<decision>` through the
+table, and a later `intent_drafted` returns the requirement to `awaiting_intent`.
+
+**Files.** `src/ultron/engine/states.py`, `tests/engine/test_states.py`. Acceptance tests untouched.
+
+**Order.** Unit tests first (red): the row in the hand-written legal table (so every other `intent.*` pair stays
+illegal), and a fold through intent changes, a redraft and approval. Then the row (green), then `make build`,
+`make lint`, `make test`.
+
+**Risks.** `tests/acceptance/test_t08.py::test_ac1_strict_s3_gate_decisions_are_illegal` pins `intent.changes` as
+illegal. The owner approved the change (D28); that test belongs to the testing agent and is expected to fail until
+it is updated.
+
+**Proof.** `pytest tests/engine/test_states.py`, then `make build`, `make lint`, `make test` (only the acceptance test
+above fails).
