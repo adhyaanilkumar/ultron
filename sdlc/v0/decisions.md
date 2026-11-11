@@ -172,3 +172,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R2 | First implementation; MCP Inspector used while building | Failed (5 tests): hostile config_snapshot passed on unlabelled; repo text in errors unlabelled; C1 controls kept; stdout fd 1 not protected |
 | 2 | R3 | Validate snapshot values (types and ranges) and label anything repo-derived, errors included; strip all C1 controls; move fd 1 to stderr and write the protocol to a duplicate; children get stdin=DEVNULL | In progress |
+| 2026-11-11 | result | T10 attempt 3 | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T05 reopen | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T10 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T05 (reopen) into v0-design | adhyaanilkumar | approve | |
