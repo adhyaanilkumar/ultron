@@ -125,3 +125,9 @@ Not touched: `tests/acceptance/`, `tasks.md`, `decisions.md`, `spec.md`, `tasks.
 3. AC8 and the `ci` rows can't be proven without a GitHub remote. Reported as ci-blocked. Adding a remote or pushing is outside this task.
 4. The `make UV=` workaround never worked with spaces. The CLAUDE.md note is corrected so the owner doesn't rely on it.
 5. `Co-Authored-By` for this commit follows the brief (Opus 5.5), which conflicts with the harness reminder (Haiku 5.5). The owner should pick one.
+
+**Departures from this rerun plan (CODE step, R0)**
+- The PATH change is made in each recipe's shell (`env PATH=...`), not with `export PATH` in make. The first try broke `make test`: MSYS2 make's PATH mangles `;` entries, so the child lost `make`.
+- The `make` folder is added as well as the uv folder, because MSYS2 make also drops its own folder from the PATH it gives children (`C:\msys64\usr\bin`), so `make` wasn't found inside the acceptance tests even before this change. Both folders go in POSIX form via `cygpath`.
+- The fallback and the PATH prefix run only on Windows (`ifeq ($(OS),Windows_NT)`), so Linux CI never calls `cygpath`.
+- `tests/test_makefile.py` has no Linux-only skip: the uv-on-PATH test runs everywhere, and the fallback test runs only on Windows.

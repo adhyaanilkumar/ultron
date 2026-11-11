@@ -9,7 +9,7 @@ An AI-native SDLC pipeline that is **injected into coding agents**, not a standa
 Status: V0 build in progress. The Python stack is in place (T01): run the commands below before reporting anything done.
 
 ## Commands
-Run from the repo root. Python 3.13 with `uv`. On Windows, if `make` isn't found, run `$env:Path += ";C:\msys64\usr\bin"` first. If `uv` isn't on PATH, run `make UV="C:\Users\Anil Kumar ML\.local\bin\uv.exe" <target>`.
+Run from the repo root. Python 3.13 with `uv`. On Windows, if `make` isn't found, run `$env:Path += ";C:\msys64\usr\bin"` first. If `uv` isn't on PATH, the Makefile uses the per-user install in `%USERPROFILE%\.local\bin`.
 - `make build`: `uv sync --locked` and `uv build`. Ends with `Build succeeded`.
 - `make lint`: `ruff check`, `ruff format --check` and `mypy src` (strict). Ends with `Lint succeeded`.
 - `make test`: `pytest`. Ends with `All tests passed`.
