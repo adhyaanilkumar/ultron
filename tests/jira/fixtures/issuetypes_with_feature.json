@@ -1,0 +1,58 @@
+{
+  "_capture": {
+    "date": "2026-11-11",
+    "source": "derived: issuetypes_ak.json plus one Feature entry",
+    "notes": "AK has no Feature type, so the 'Feature exists' case adds one entry in the same shape (id 10099 is a placeholder)."
+  },
+  "response": {
+    "startAt": 0,
+    "maxResults": 50,
+    "total": 4,
+    "issueTypes": [
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10015",
+        "id": "10015",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10307?size=medium",
+        "name": "Epic",
+        "untranslatedName": "Epic",
+        "subtask": false,
+        "hierarchyLevel": 1,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      },
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10016",
+        "id": "10016",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10315?size=medium",
+        "name": "Story",
+        "untranslatedName": "Story",
+        "subtask": false,
+        "hierarchyLevel": 0,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      },
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10017",
+        "id": "10017",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10303?size=medium",
+        "name": "Bug",
+        "untranslatedName": "Bug",
+        "subtask": false,
+        "hierarchyLevel": 0,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      },
+      {
+        "self": "https://example.atlassian.net/rest/api/3/issuetype/10099",
+        "id": "10099",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10314?size=medium",
+        "name": "Feature",
+        "untranslatedName": "Feature",
+        "subtask": false,
+        "hierarchyLevel": 0,
+        "scope": {"type": "PROJECT", "project": {"id": "10002"}}
+      }
+    ]
+  }
+}
