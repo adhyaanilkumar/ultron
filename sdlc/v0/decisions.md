@@ -65,6 +65,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R2 | First implementation | Failed (2 tests): repeat escalation (Jira ticket) record after the requirement settled raised `IllegalTransition` |
 | 2 | R3 | Repeat escalation for an already-escalated task checked first and made a no-op; a first escalation on a settled requirement stays illegal | Passed: 163/163 T08 acceptance tests (24 new); new tests fail on attempt-1 code for the right reason |
+| Rerun for D27 (send-back, not counted) | R3 | Added `call_for_edit` with triggers `attachment_missing`, `edit_requested`, `edit_done`; a filed task in call_for_edit counts as escalated; not an attempt | Passed: 220 T08 acceptance tests, 1844 total |
 
 ### T13 · Usage and caps (correction, not a failed attempt)
 | Attempt | Rung | What was different | Result |
