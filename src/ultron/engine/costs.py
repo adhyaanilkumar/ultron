@@ -65,6 +65,13 @@ class PriceTable:
     as_of: str
     source: str
     prices: Mapping[str, ModelPrice]
+    aliases: Mapping[str, str] = field(default_factory=dict)
+    upper_bound_models: frozenset[str] = frozenset()
+
+    def resolve(self, model: str) -> str | None:
+        """The table key for a model id or short alias, or None if unknown."""
+        key = self.aliases.get(model, model)
+        return key if key in self.prices else None
 
     def replace(self, model: str, price: ModelPrice) -> PriceTable:
         return replace(self, prices={**self.prices, model: price})
@@ -78,24 +85,38 @@ class PriceTable:
         return ModelPrice(highest[0], highest[1], highest[2], highest[3])
 
 
-def _price(i: str, o: str) -> ModelPrice:
-    inp = Decimal(i)
-    return ModelPrice(inp, Decimal(o), inp * Decimal("0.1"), inp * Decimal("1.25"))
+def _price(i: str, o: str, cache_read: str) -> ModelPrice:
+    # Cache write is ASSUMED at 1.25x input (5-minute TTL); it is not in the list prices we were given.
+    return ModelPrice(
+        Decimal(i), Decimal(o), Decimal(cache_read), Decimal(i) * Decimal("1.25")
+    )
 
 
 DEFAULT_PRICES = PriceTable(
-    version="1",
-    as_of="2026-11-11",
-    source=(
-        "ASSUMED, owner to confirm: the spec gives no prices. Tier prices carried over from the previous "
-        "generation (Haiku 1/5, Sonnet 3/15, Opus 5/25 USD per million input/output tokens); cache read 0.1x "
-        "and cache write 1.25x the input price."
-    ),
+    version="2",
+    as_of="2026-11-03",
+    source="Anthropic list prices",
     prices={
-        "haiku-5.5": _price("1", "5"),
-        "sonnet-5.5": _price("3", "15"),
-        "opus-5.5": _price("5", "25"),
+        # Haiku has two tiers (0.10/0.50 up to 100K prompt tokens, 0.50/2.50 beyond). The event does not carry
+        # the prompt size, so the higher tier is used: an upper bound (see `upper_bound_models`).
+        # ASSUMED: haiku cache read 0.1x input (no list price given); cache write 1.25x input for all models.
+        "claude-haiku-5-5": _price("0.50", "2.50", "0.05"),
+        "claude-sonnet-5-5": _price("2.00", "10.00", "0.10"),
+        "claude-opus-5-5": _price("4.00", "20.00", "0.20"),
+        # R6, self-build only: included so Fable calls are never costed as unknown.
+        "claude-fable-5-2": _price("8.00", "40.00", "0.20"),
     },
+    aliases={
+        "haiku": "claude-haiku-5-5",
+        "sonnet": "claude-sonnet-5-5",
+        "opus": "claude-opus-5-5",
+        "fable": "claude-fable-5-2",
+        "haiku-5.5": "claude-haiku-5-5",
+        "sonnet-5.5": "claude-sonnet-5-5",
+        "opus-5.5": "claude-opus-5-5",
+        "fable-5.2": "claude-fable-5-2",
+    },
+    upper_bound_models=frozenset({"claude-haiku-5-5"}),
 )
 
 
@@ -112,16 +133,20 @@ class CostResult:
     cost: Decimal
     price_known: bool
     unknown_token_kinds: tuple[str, ...] = ()
+    upper_bound: bool = False
 
     @property
     def flagged(self) -> bool:
-        return not self.price_known or bool(self.unknown_token_kinds)
+        return (
+            not self.price_known or bool(self.unknown_token_kinds) or self.upper_bound
+        )
 
 
 def usage_cost(record: UsageRecord, prices: PriceTable) -> CostResult:
     """Estimated USD for one call. An unknown model or token kind is never free: it takes the highest price."""
-    known = record.model in prices.prices
-    price = prices.prices[record.model] if known else prices.most_expensive()
+    key = prices.resolve(record.model)
+    known = key is not None
+    price = prices.prices[key] if key is not None else prices.most_expensive()
     total = Decimal(0)
     unknown: list[str] = []
     for kind, count in record.tokens.items():
@@ -130,7 +155,12 @@ def usage_cost(record: UsageRecord, prices: PriceTable) -> CostResult:
             unknown.append(kind)
             rate = price.highest()
         total += rate * count / _PER
-    return CostResult(total, known, tuple(sorted(unknown)))
+    return CostResult(
+        total,
+        known,
+        tuple(sorted(unknown)),
+        upper_bound=key in prices.upper_bound_models,
+    )
 
 
 class CapAction(Enum):
