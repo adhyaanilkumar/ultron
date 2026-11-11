@@ -172,7 +172,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R2 | First implementation; MCP Inspector used while building | Failed (5 tests): hostile config_snapshot passed on unlabelled; repo text in errors unlabelled; C1 controls kept; stdout fd 1 not protected |
 | 2 | R3 | Validate snapshot values (types and ranges) and label anything repo-derived, errors included; strip all C1 controls; move fd 1 to stderr and write the protocol to a duplicate; children get stdin=DEVNULL; 256 KB caps | Failed (1 test): unterminated 7-bit OSC swallows the rest of a file; all security and protocol checks passed |
-| 3 | R4 | Bound the 7-bit OSC like the 8-bit one (end of line); consider other C0 controls and DEL | In progress |
+| 3 | R4 | One rule for every string escape sequence (7- and 8-bit): stop at BEL/ST/CAN/SUB/ESC/C1/end of line; other C0 and DEL become U+FFFD | Developer green (4825 passed, test_t36.py 81 + 1 platform skip); in testing |
 | 2026-11-11 | result | T10 attempt 3 | adhyaanilkumar | approve | |
 | 2026-11-11 | result | T05 reopen | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T10 into v0-design | adhyaanilkumar | approve | |
