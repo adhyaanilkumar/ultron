@@ -218,12 +218,18 @@ def test_newer_schema_on_read(tmp_path: Path) -> None:
 # --- AC4 ------------------------------------------------------------------------------------------------------
 
 
-def test_truncated_tail(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "cut",
+    [1, 12, 37, -2, -1],
+    ids=["1-byte", "in-a-key", "mid-line", "before-brace", "all-but-newline"],
+)
+def test_truncated_tail(cut: int, tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     log = EventLog(path)
     log.append([_new(i) for i in range(3)])
     good = path.read_bytes()
-    partial = _good_line(4)[:37]
+    partial = _good_line(4)[:cut]
+    assert partial and not partial.endswith(b"\n")
     with path.open("ab") as f:
         f.write(partial)
 

@@ -2,7 +2,8 @@
 
 Windows uses `msvcrt.locking` on the first byte; its blocking mode gives up after about 10 seconds, so both
 platforms poll a non-blocking lock until an overall timeout. Linux uses `fcntl.flock`. The lock is held by an open
-file handle, so it is released if the process dies.
+file handle, so it is released if the process dies. `LOCK_BACKEND` names the one in use (`"msvcrt"` or `"fcntl"`),
+so a test run can show which lock it proved.
 """
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ import sys
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Final, Self
+
+__all__ = ["LOCK_BACKEND", "FileLock", "LockTimeout"]
 
 _O_BINARY: int = getattr(os, "O_BINARY", 0)
 
@@ -23,6 +26,8 @@ class LockTimeout(TimeoutError):
 
 if sys.platform == "win32":
     import msvcrt
+
+    LOCK_BACKEND: Final[str] = "msvcrt"
 
     def _try_lock(fd: int) -> bool:
         os.lseek(fd, 0, os.SEEK_SET)
@@ -38,6 +43,8 @@ if sys.platform == "win32":
 
 else:
     import fcntl
+
+    LOCK_BACKEND: Final[str] = "fcntl"
 
     def _try_lock(fd: int) -> bool:
         try:

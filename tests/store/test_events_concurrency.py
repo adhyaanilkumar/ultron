@@ -1,4 +1,8 @@
-"""AC2: 4 processes appending 50 events each give 200 valid lines with unique, gap-free `seq`."""
+"""AC2: 4 processes appending 50 events each give 200 valid lines with unique, gap-free `seq`.
+
+Each worker reports the lock it used, so a pass names the OS lock it proved (AC6: msvcrt on Windows, fcntl
+on Linux).
+"""
 
 import json
 import subprocess
@@ -8,6 +12,7 @@ from pathlib import Path
 
 from ultron.store.eventlog import EventLog
 
+EXPECTED_BACKEND = "msvcrt" if sys.platform == "win32" else "fcntl"
 WORKERS = 4
 PER_WORKER = 50
 TIMEOUT_S = 60
@@ -15,6 +20,7 @@ TIMEOUT_S = 60
 WORKER = """
 import sys, time
 from pathlib import Path
+from ultron.store._filelock import LOCK_BACKEND
 from ultron.store.eventlog import EventLog
 from ultron.store.events import NewEvent
 
@@ -29,6 +35,7 @@ while not go.exists():
 for i in range(int(sys.argv[5])):
     log.append(NewEvent(actor="engine", type="probe", requirement="R1",
                         data={"worker": worker, "i": i}))
+print(LOCK_BACKEND)
 """
 
 
@@ -64,8 +71,9 @@ def test_concurrent_appends(tmp_path: Path) -> None:
         _wait_for(ready, deadline)
         go.touch()
         for proc in procs:
-            _, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
+            out, err = proc.communicate(timeout=max(1.0, deadline - time.monotonic()))
             assert proc.returncode == 0, err.decode(errors="replace")
+            assert out.decode().strip() == EXPECTED_BACKEND
     finally:
         for proc in procs:
             if proc.poll() is None:

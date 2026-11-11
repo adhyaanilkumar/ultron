@@ -55,6 +55,13 @@ What the rerun can and can't do:
 3. **PATH under MSYS make on Windows.** Appending `C:\msys64\usr\bin` to PATH makes MSYS drop it for child processes,
    so T01's acceptance tests can't find `make`. Prepend it instead (environment only; no code change).
 
+### Changes during the rerun build
+- `_filelock.py` also gained `__all__`. The truncation test runs at five offsets (1 byte, inside a key, mid-line,
+  before the closing brace, all but the newline).
+- The Linux stand-in can't bind-mount the Windows worktree: NTFS files show as mode 0777, so ruff reports `EXE002`
+  on every file (27 false errors), and the files have CRLF endings. It runs instead on
+  `git -c core.autocrlf=false archive` of the staged tree, which has git's modes and LF endings, as a CI checkout does.
+
 ## Original plan (attempts 1 and 2, kept as written)
 
 ### Files that change
