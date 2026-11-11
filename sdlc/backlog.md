@@ -82,3 +82,15 @@ Decided 2026-11-10 by the owner, from the V0 self-build (lessons L1 and L2, and 
   - A task whose `verify_with` needs a missing tool falls back to an `owner` check and is flagged.
   - An MCP never replaces ultron's own engine checks. Tests of ultron's code still run against ultron's code.
 - **Why:** T35's mascot passed 80 tests but looked wrong on screen, because no criterion said how it had to be checked (lesson L1). In social-grid the owner picked the 21st.dev MCP for UI by hand. This makes that choice part of the pipeline.
+
+## Send back to an earlier stage (from any gate)
+Decided 2026-11-10 by the owner (lesson L3 in `sdlc/v0/lessons.md`):
+- **What:** every gate form gets a "send back to" choice: intake, spec, decomposition or plan, plus a required comment. Today a gate can only approve, request changes to the same stage, or reject.
+- **Engine behaviour:**
+  - It reruns the chosen stage's agent with the comment.
+  - It marks every artifact and task built on the old version **stale**.
+  - It shows the user which tasks are affected and the estimated usage before rerunning.
+  - Each affected task reruns plan → code → test from the new artifact, starting from its existing code.
+  - Merged tasks reopen.
+  - A send-back isn't a failed attempt and doesn't climb a rung.
+- **Recorded** as a `gate.sent_back` event (who, when, from which gate, to which stage, comment), in `decisions.md`.
