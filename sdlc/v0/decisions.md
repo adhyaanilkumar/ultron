@@ -98,3 +98,9 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | merge | v0/T08 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | spec | D28 intent gate allows changes | adhyaanilkumar | approve | T10 AC6 conflicted with T08's strict §3 reading; owner chose to allow intent → changes → intake_drafting |
 | 2026-11-11 | sent back | T08 (merged; reopens) | engine | rerun | add the D28 transition; owner-approved update of T08's strict acceptance test; not counted |
+| 2026-11-11 | result | T09 | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T15 | adhyaanilkumar | approve | |
+| 2026-11-11 | result | T25 | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T09 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T15 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T25 into v0-design | adhyaanilkumar | approve | |
