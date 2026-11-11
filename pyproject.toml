@@ -4,7 +4,10 @@ version = "0.0.0"
 description = "An AI-native SDLC pipeline injected into coding agents."
 readme = "CLAUDE.md"
 requires-python = ">=3.13"
-dependencies = ["pydantic"]
+dependencies = [
+    "httpx>=0.28",
+    "pydantic",
+]
 
 [project.scripts]
 ultron = "ultron.cli:main"
@@ -20,6 +23,7 @@ dev = [
     "pyte>=0.8.2",
     "pytest",
     "pyyaml",
+    "respx>=0.22",
     "ruff",
 ]
 spikes = [
@@ -31,6 +35,9 @@ default-groups = ["dev"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: calls the real Jira test project; run only with -m live (owner step)",
+]
 
 [tool.mypy]
 strict = true

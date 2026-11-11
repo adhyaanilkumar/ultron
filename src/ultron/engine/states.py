@@ -100,6 +100,10 @@ REQUIREMENT_TRANSITIONS: Mapping[tuple[RequirementState, str], RequirementState]
             ): R.SPEC_DRAFTING,  # template intent: no intake
             (R.INTAKE_DRAFTING, "intent_drafted"): R.AWAITING_INTENT,
             (R.AWAITING_INTENT, "intent.approve"): R.SPEC_DRAFTING,
+            (
+                R.AWAITING_INTENT,
+                "intent.changes",
+            ): R.INTAKE_DRAFTING,  # D28: the comment goes to the intake agent
             (R.SPEC_DRAFTING, "spec_drafted"): R.AWAITING_SPEC,
             (R.AWAITING_SPEC, "spec.changes"): R.SPEC_DRAFTING,
             (R.AWAITING_SPEC, "spec.approve"): R.SPEC_APPROVED,
