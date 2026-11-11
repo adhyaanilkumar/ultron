@@ -109,3 +109,9 @@ Decided 2026-11-11 by the owner (lesson L13 in `sdlc/v0/lessons.md`):
 - **What:** distinct agent types per role (developer, tester, spec, decomposition, maintenance, scout, intake), each with its own allowed tools, write scope and model, instead of one general-purpose agent steered by its prompt.
 - **Why:** in the V0 self-build, general-purpose agents wrote empty files into the main repo four times, and the "don't edit `tests/acceptance/`" and "don't edit `src/`" rules live only in prompts. A class can enforce them in its tools.
 - **For now (V0):** keep general-purpose agents; prompts carry the rules and the engine checks the main checkout before each merge.
+
+## Run agents in a sandbox or container
+Decided 2026-11-11 by the owner (spec D31; T16 testing):
+- **What:** run each developer and testing agent inside an OS sandbox (the Agent SDK's sandbox on Linux and macOS) or a container per task (Docker), so code the agent writes can't reach outside the worktree, the network, or the user's git config when an allowed command runs it.
+- **Why:** T16's testing agent showed an agent-written `conftest.py`, run by `python -m pytest`, could write outside every repo, change `~/.bashrc` and `git push`, and the after-call checks didn't catch those. No permission check on commands can close this.
+- **Until then (V0):** known limit (D31); after-call checks plus human review of every result and merge.
