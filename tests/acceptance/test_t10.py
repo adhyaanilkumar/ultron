@@ -13,6 +13,12 @@ with T05's builders, so the setup never goes through `Gatekeeper.decide`; only t
 - AC5 `test_ac5_*`: `decisions.md` from the events, in order, byte-identical across regenerations and processes.
 - AC6 `test_ac6_*`: request changes at `intent` (D28), `spec` and `plan` returns to drafting with the comment fed back
   until the next draft.
+
+Attempt 2 (`test_a2_*`, after 8f73f70): the two attempt-1 failures re-checked for the right reason; locked gates
+attacked through every input (snapshot, change event, events forged with odd casing, whitespace, unknown fields and
+non-string values, hand-built settings, presets, overrides, `change_gate`, odd spellings in `decide`); the escalation
+gate from every task state (spec §3, §12, D27) with both decision kinds, the log byte-identical on refusal; a repeat
+escalation decision; and the `maintain` gate's invariants that hold whatever T33 defines as reaching it.
 """
 
 from __future__ import annotations
@@ -33,8 +39,13 @@ from ultron.engine.gates import (
     CONFIG_CHANGE,
     CONFIG_WARNING,
     GATES,
+    GateChange,
+    GateError,
     Gatekeeper,
+    GateSettings,
+    gate_reached,
     render_decisions,
+    settings_from,
 )
 from ultron.engine.states import RequirementState, TaskState, fold
 from ultron.store import events as ev
@@ -1185,3 +1196,823 @@ def test_ac6_feedback_is_none_before_any_changes(tmp_path: Path) -> None:
 def test_gate_table_has_the_ten_gates_of_spec_8(tmp_path: Path) -> None:
     assert set(GATES) == set(GATE_NAMES)
     assert {g for g, info in GATES.items() if info.locked} == set(LOCKED)
+
+
+# ==================================================================================================================
+# Attempt 2
+# ==================================================================================================================
+
+
+def forge(
+    gk: Gatekeeper,
+    type_: str,
+    data: dict[str, Any],
+    *,
+    actor: str = HUMAN,
+    task: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Write one line straight to `events.jsonl`, as a hand edit or another writer would (unknown fields kept)."""
+    event = ev.Event(
+        schema=ev.SCHEMA_VERSION,
+        seq=len(evs(gk)) + 1,
+        time="2026-11-11T05:00:00Z",
+        actor=actor,
+        type=type_,
+        requirement=REQ,
+        task=task,
+        attempt=None,
+        data=data,
+        ultron_version="0.0.0",
+        extra=extra or {},
+    )
+    with gk.log.path.open("ab") as fh:
+        fh.write(ev.to_json_line(event))
+
+
+def forged_snapshot(tmp_path: Path, gates: object, sub: str = "forged") -> Gatekeeper:
+    """A log whose submit snapshot was written without T05's builder checks (any `gates` value)."""
+    folder = tmp_path / sub
+    folder.mkdir(parents=True, exist_ok=True)
+    gk = Gatekeeper(EventLog(folder / "events.jsonl"), REQ)
+    gk.log.append(
+        ev.NewEvent(
+            actor="engine",
+            type=ev.CONFIG_SNAPSHOT,
+            requirement=REQ,
+            data={"max_attempts": 3, "gates": gates},
+        )
+    )
+    return gk
+
+
+def refused_any(gk: Gatekeeper, call: Callable[[], object]) -> None:
+    """`call` raises (a gate error, or a TypeError on a malformed log: it fails closed) and the log is unchanged."""
+    before = gk.log.path.read_bytes()
+    with pytest.raises((ValueError, TypeError)):
+        call()
+    assert gk.log.path.read_bytes() == before
+
+
+def auto_decide(gk: Gatekeeper, gate: str, item: str = REQ) -> ev.Event:
+    return gk.decide(gate, item, "approve", "", "auto", "auto", checks_passed=True)
+
+
+# --- the attempt-1 failures, re-checked for the right reason -------------------------------------------------------
+
+
+@pytest.mark.parametrize("gate", LOCKED)
+def test_a2_attempt1_forged_change_is_skipped_not_only_masked(
+    tmp_path: Path, gate: str
+) -> None:
+    """`test_ac2_a_forged_config_change_cannot_make_a_locked_gate_auto` passes because the change is never folded
+    (not only hidden by the last read), the snapshot layer stays human, and auto is refused as locked."""
+    gk = gk_for(tmp_path, {"preset": "unattended"})
+    complete(gk)
+    gk.log.append(
+        ev.NewEvent(
+            actor=HUMAN,
+            type=CONFIG_CHANGE,
+            requirement=REQ,
+            data={"gate": gate, "from": "human", "to": "auto", "reached": False},
+        )
+    )
+    settings = settings_from(evs(gk))
+    assert settings.changes == ()
+    assert settings.modes[gate] == "human"
+    assert settings.mode(gate) == "human"
+    before = gk.log.path.read_bytes()
+    with pytest.raises(GateError, match="locked"):
+        auto_decide(gk, gate)
+    assert gk.log.path.read_bytes() == before
+    gk.decide(
+        gate, REQ, "approve", "", HUMAN, "form"
+    )  # the gate itself still works for a human
+
+
+def test_a2_attempt1_escalation_refusal_is_about_reaching_the_gate(
+    tmp_path: Path,
+) -> None:
+    """`test_ac3_auto_escalation_is_refused_for_a_task_that_is_not_failing` passes because of the reached rule: a
+    gate error (not a crash or a fold error), and the very same call is taken once the task fails."""
+    gk = gk_for(tmp_path, {"preset": "unattended"})
+    in_progress(gk, {"T1": []}, ma=1)
+    at_plan(gk, "T1")
+    before = gk.log.path.read_bytes()
+    with pytest.raises(GateError, match="awaiting_plan"):
+        auto_decide(gk, "escalation", "T1")
+    assert gk.log.path.read_bytes() == before
+    run_attempt(gk, "T1", 1, "failed")
+    assert task_state(gk, "T1") is T.FAILED
+    event = auto_decide(gk, "escalation", "T1")
+    assert event.task == "T1"
+    assert event.actor == "auto"
+
+
+# --- locked gates through every input -----------------------------------------------------------------------------
+
+ODD_MODES: list[Any] = [
+    "AUTO",
+    "Auto",
+    " auto",
+    "auto ",
+    "auto\n",
+    "",
+    "human ",
+    None,
+    0,
+    1,
+    True,
+    False,
+    ["auto"],
+    {"mode": "auto"},
+]
+
+
+@pytest.mark.parametrize("gate", LOCKED)
+@pytest.mark.parametrize("value", ["auto", *ODD_MODES], ids=repr)
+def test_a2_a_locked_gate_reads_human_whatever_the_snapshot_holds(
+    tmp_path: Path, gate: str, value: Any
+) -> None:
+    """8f73f70: "a snapshot mode outside human/auto reads human" and locked gates read human at every layer, so
+    `ultron_settings` shows them human. JSON lists and objects are values outside human/auto too."""
+    gk = forged_snapshot(tmp_path, dict.fromkeys(GATE_NAMES, value))
+    settings = gk.settings()
+    assert settings.modes[gate] == "human"
+    assert settings.mode(gate) == "human"
+    assert settings.mode(gate, "T1") == "human"
+
+
+@pytest.mark.parametrize("gate", LOCKED)
+@pytest.mark.parametrize("value", ["auto", *ODD_MODES], ids=repr)
+def test_a2_auto_never_passes_a_locked_gate_whatever_the_snapshot_holds(
+    tmp_path: Path, gate: str, value: Any
+) -> None:
+    gk = forged_snapshot(tmp_path, dict.fromkeys(GATE_NAMES, value))
+    complete(gk)
+    refused_any(gk, lambda: auto_decide(gk, gate))
+    gk.decide(gate, REQ, "approve", "", HUMAN, "form")  # a human still can
+
+
+@pytest.mark.parametrize("value", ODD_MODES, ids=repr)
+def test_a2_an_odd_snapshot_mode_reads_human_for_a_changeable_gate(
+    tmp_path: Path, value: Any
+) -> None:
+    gk = forged_snapshot(tmp_path, dict.fromkeys(GATE_NAMES, value))
+    settings = gk.settings()
+    for gate in CHANGEABLE:
+        assert settings.mode(gate) == "human", gate
+    at_tasks(gk, {"T1": []})
+    refused(gk, lambda: auto_decide(gk, "tasks"))
+
+
+@pytest.mark.parametrize(
+    "gates",
+    [
+        {
+            "MERGE": "auto",
+            "Merge": "auto",
+            " merge": "auto",
+            "merge ": "auto",
+            "DEPLOY": "auto",
+            "Rollback": "auto",
+            "rollback\n": "auto",
+        },
+        ["merge", "auto"],
+        "merge=auto",
+        None,
+        {},
+    ],
+    ids=["spelled-keys", "list", "string", "null", "empty"],
+)
+def test_a2_odd_snapshot_shapes_leave_locked_gates_human(
+    tmp_path: Path, gates: object
+) -> None:
+    gk = forged_snapshot(tmp_path, gates)
+    for gate in LOCKED:
+        assert gk.settings().mode(gate) == "human"
+    complete(gk)
+    for gate in LOCKED:
+        refused(gk, lambda g=gate: auto_decide(gk, g))
+
+
+def test_a2_a_later_snapshot_cannot_make_a_locked_gate_auto(tmp_path: Path) -> None:
+    gk = gk_for(tmp_path, {"preset": "unattended"})
+    complete(gk)
+    every_auto = {"max_attempts": 9, "gates": dict.fromkeys(GATE_NAMES, "auto")}
+    gk.log.append(
+        ev.NewEvent(
+            actor="engine", type=ev.CONFIG_SNAPSHOT, requirement=REQ, data=every_auto
+        )
+    )
+    forge(gk, ev.CONFIG_SNAPSHOT, every_auto, actor="engine", extra={"replaces": 1})
+    settings = gk.settings()
+    assert settings.max_attempts == 3  # the submit snapshot is the one in force
+    for gate in LOCKED:
+        assert settings.mode(gate) == "human"
+        refused(gk, lambda g=gate: auto_decide(gk, g))
+
+
+def _change(gate: object, to: object = "auto", **more: Any) -> dict[str, Any]:
+    return {
+        "gate": gate,
+        "from": "human",
+        "to": to,
+        "reached": False,
+        "reached_tasks": [],
+        "warning": None,
+        **more,
+    }
+
+
+def forged_change(
+    gate: str, variant: str
+) -> tuple[str, str, dict[str, Any], dict[str, Any] | None]:
+    """(actor, type, data, unknown top-level fields) of a config change written by hand to the log."""
+    plain = (HUMAN, CONFIG_CHANGE)
+    table: dict[str, tuple[str, str, dict[str, Any], dict[str, Any] | None]] = {
+        "human": (*plain, _change(gate), None),
+        "unknown-fields": (
+            *plain,
+            _change(gate, locked=False, force=True, override="auto"),
+            {"locked": False, "override": True},
+        ),
+        "engine": ("engine", CONFIG_CHANGE, _change(gate), None),
+        "auto": ("auto", CONFIG_CHANGE, _change(gate), None),
+        "agent": ("agent:developer", CONFIG_CHANGE, _change(gate), None),
+        "user-agent": ("user:agent:developer", CONFIG_CHANGE, _change(gate), None),
+        "gate-upper": (*plain, _change(gate.upper()), None),
+        "gate-title": (*plain, _change(gate.title()), None),
+        "gate-lead-space": (*plain, _change(f" {gate}"), None),
+        "gate-trail-space": (*plain, _change(f"{gate} "), None),
+        "gate-list": (*plain, _change([gate]), None),
+        "to-upper": (*plain, _change(gate, "AUTO"), None),
+        "to-space": (*plain, _change(gate, " auto"), None),
+        "to-list": (*plain, _change(gate, ["auto"]), None),
+        "to-object": (*plain, _change(gate, {"to": "auto"}), None),
+        "to-null": (*plain, _change(gate, None), None),
+        "to-true": (*plain, _change(gate, True), None),
+        "type-upper": (HUMAN, "CONFIG_CHANGE", _change(gate), None),
+        "type-space": (HUMAN, "config_change ", _change(gate), None),
+        "reached-tasks": (*plain, _change(gate, reached_tasks=["T1"]), None),
+        "reached-text": (*plain, _change(gate, reached="false"), None),
+    }
+    return table[variant]
+
+
+LOCKED_CHANGE_VARIANTS = [
+    "human",
+    "unknown-fields",
+    "engine",
+    "auto",
+    "agent",
+    "user-agent",
+    "gate-upper",
+    "gate-title",
+    "gate-lead-space",
+    "gate-trail-space",
+    "gate-list",
+    "to-upper",
+    "to-space",
+    "to-list",
+    "to-object",
+    "type-upper",
+    "type-space",
+    "reached-tasks",
+    "reached-text",
+]
+
+
+@pytest.mark.parametrize("gate", LOCKED)
+@pytest.mark.parametrize("variant", LOCKED_CHANGE_VARIANTS)
+def test_a2_no_config_change_in_the_log_makes_a_locked_gate_auto(
+    tmp_path: Path, gate: str, variant: str
+) -> None:
+    gk = gk_for(tmp_path, {"preset": "unattended"})
+    complete(gk)
+    actor, type_, data, extra = forged_change(gate, variant)
+    forge(gk, type_, data, actor=actor, extra=extra)
+    settings = gk.settings()
+    assert settings.mode(gate) == "human"
+    assert settings.mode(gate, "T1") == "human"
+    assert all(change.gate not in LOCKED for change in settings.changes)
+    refused(gk, lambda: auto_decide(gk, gate))
+
+
+CHANGEABLE_CHANGE_VARIANTS = [
+    "engine",
+    "auto",
+    "agent",
+    "gate-upper",
+    "gate-lead-space",
+    "gate-list",
+    "to-upper",
+    "to-space",
+    "to-list",
+    "to-object",
+    "to-null",
+    "to-true",
+    "type-upper",
+    "type-space",
+]
+
+
+@pytest.mark.parametrize("variant", CHANGEABLE_CHANGE_VARIANTS)
+def test_a2_a_change_change_gate_could_not_write_is_skipped(
+    tmp_path: Path, variant: str
+) -> None:
+    """8f73f70: `settings_from` "ignores a config_change that change_gate could not have written (not by a human
+    identity, an unknown gate, a mode outside human/auto)". Skipped means the settings still read, unchanged."""
+    gk = gk_for(tmp_path, {"preset": "strict"})  # plan is human
+    in_progress(gk, {"T1": []})
+    actor, type_, data, extra = forged_change("plan", variant)
+    forge(gk, type_, data, actor=actor, extra=extra)
+    settings = gk.settings()
+    assert settings.mode("plan") == "human"
+    assert settings.mode("plan", "T1") == "human"
+    at_plan(gk, "T1")
+    refused_any(gk, lambda: auto_decide(gk, "plan", "T1"))
+
+
+@pytest.mark.parametrize("variant", ["human", "unknown-fields"])
+def test_a2_a_well_formed_change_still_applies(tmp_path: Path, variant: str) -> None:
+    """Control for the test above: a change `change_gate` could have written (unknown extra fields are kept, not
+    fatal: T05) does apply to a task that has not reached the gate."""
+    gk = gk_for(tmp_path, {"preset": "strict"})
+    in_progress(gk, {"T1": []})
+    actor, type_, data, extra = forged_change("plan", variant)
+    forge(gk, type_, data, actor=actor, extra=extra)
+    assert gk.settings().mode("plan", "T1") == "auto"
+    at_plan(gk, "T1")
+    assert auto_decide(gk, "plan", "T1").actor == "auto"
+
+
+def test_a2_hand_built_settings_keep_locked_gates_human() -> None:
+    every_auto = GateSettings(
+        max_attempts=3,
+        modes=dict.fromkeys(GATE_NAMES, "auto"),
+        changes=(
+            *(GateChange(g, "auto", False, ("T1",)) for g in LOCKED),
+            *(GateChange(g, "auto", True) for g in LOCKED),
+            *(GateChange(g, "auto", False) for g in LOCKED),
+        ),
+    )
+    for gate in LOCKED:
+        assert every_auto.mode(gate) == "human"
+        assert every_auto.mode(gate, "T1") == "human"
+        assert every_auto.mode(gate, "T2") == "human"
+    odd = GateSettings(
+        max_attempts=3,
+        modes={"plan": "AUTO", "spec": " auto", "tasks": "Auto"},
+        changes=(GateChange("intent", "AUTO", False), GateChange("result", "", False)),
+    )
+    for gate in ("plan", "spec", "tasks", "intent", "result", "escalation"):
+        assert odd.mode(gate) == "human", gate
+    for spelled in ("MERGE", " merge", "merge ", "Deploy"):
+        with pytest.raises(GateError):
+            every_auto.mode(spelled)
+
+
+@pytest.mark.parametrize("preset", sorted(SPEC_8))
+@pytest.mark.parametrize(
+    "override",
+    [
+        None,
+        {"gates": {"preset": "unattended"}},
+        {"gates": {"preset": "strict"}},
+        {"gates": dict.fromkeys(CHANGEABLE, "auto")},
+    ],
+    ids=["none", "to-unattended", "to-strict", "every-changeable-auto"],
+)
+def test_a2_no_preset_or_override_makes_a_locked_gate_auto(
+    tmp_path: Path, preset: str, override: dict[str, Any] | None
+) -> None:
+    gk = gk_for(tmp_path, {"preset": preset}, override)
+    [snap] = [e for e in evs(gk) if e.type == ev.CONFIG_SNAPSHOT]
+    complete(gk)
+    for gate in LOCKED:
+        assert snap.data["gates"][gate] == "human"
+        assert gk.settings().mode(gate) == "human"
+        refused(gk, lambda g=gate: auto_decide(gk, g))
+
+
+def _odd_gates(gate: str, spelling: str) -> dict[str, Any]:
+    return {
+        "upper": {gate.upper(): "auto"},
+        "title": {gate.title(): "auto"},
+        "lead-space": {f" {gate}": "auto"},
+        "value-Auto": {gate: "Auto"},
+        "value-AUTO": {gate: "AUTO"},
+        "value-space": {gate: " auto"},
+        "value-human-space": {gate: "human "},
+        "value-null": {gate: None},
+        "value-true": {gate: True},
+        "value-list": {gate: ["auto"]},
+        "with-unattended": {"preset": "unattended", gate: "auto"},
+    }[spelling]
+
+
+@pytest.mark.parametrize("gate", LOCKED)
+@pytest.mark.parametrize("source", ["repo", "override"])
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "upper",
+        "title",
+        "lead-space",
+        "value-Auto",
+        "value-AUTO",
+        "value-space",
+        "value-human-space",
+        "value-null",
+        "value-true",
+        "value-list",
+        "with-unattended",
+    ],
+)
+def test_a2_an_odd_setting_for_a_locked_gate_is_refused_or_stays_human(
+    tmp_path: Path, gate: str, source: str, spelling: str
+) -> None:
+    odd = _odd_gates(gate, spelling)
+    try:
+        if source == "repo":
+            gk = gk_for(tmp_path, odd)
+        else:
+            gk = gk_for(tmp_path, {"preset": "unattended"}, {"gates": odd})
+    except ValueError:
+        return  # refused at submit (T04)
+    [snap] = [e for e in evs(gk) if e.type == ev.CONFIG_SNAPSHOT]
+    assert snap.data["gates"][gate] == "human"
+    assert gk.settings().mode(gate) == "human"
+    complete(gk)
+    refused(gk, lambda: auto_decide(gk, gate))
+
+
+@pytest.mark.parametrize("gate", LOCKED)
+def test_a2_change_gate_keeps_a_locked_gate_human(tmp_path: Path, gate: str) -> None:
+    gk = gk_for(tmp_path, {"preset": "unattended"})
+    complete(gk)
+    for mode in ("auto", "AUTO", "Auto", " auto", "auto ", "off", ""):
+        refused(gk, lambda m=mode: gk.change_gate(gate, m, who=HUMAN))
+    for spelled in (gate.upper(), gate.title(), f" {gate}", f"{gate} "):
+        refused(gk, lambda s=spelled: gk.change_gate(s, "auto", who=HUMAN))
+    try:
+        gk.change_gate(gate, "human", who=HUMAN)  # may be recorded; it changes nothing
+    except ValueError:
+        pass
+    assert gk.settings().mode(gate) == "human"
+    refused(gk, lambda: auto_decide(gk, gate))
+
+
+@pytest.mark.parametrize("gate", LOCKED)
+def test_a2_odd_spellings_in_decide_cannot_pass_a_locked_gate(
+    tmp_path: Path, gate: str
+) -> None:
+    gk = gk_for(tmp_path, {"preset": "unattended"})
+    complete(gk)
+    for spelled in (gate.upper(), gate.title(), f" {gate}", f"{gate} ", f"{gate}\n"):
+        for who, ch in (("auto", "auto"), (HUMAN, "form")):
+            refused(
+                gk,
+                lambda s=spelled, w=who, c=ch: gk.decide(
+                    s, REQ, "approve", "", w, c, checks_passed=True
+                ),
+            )
+    for who, ch in (
+        ("auto", "Auto"),
+        ("auto", "AUTO"),
+        ("auto", " auto"),
+        ("AUTO", "auto"),
+        ("Auto", "auto"),
+        ("auto ", "auto"),
+        (HUMAN, "Form"),
+        (HUMAN, "FORM"),
+        (HUMAN, " form"),
+        (HUMAN, "Terminal"),
+        (HUMAN, "auto"),
+    ):
+        refused(
+            gk,
+            lambda w=who, c=ch: gk.decide(
+                gate, REQ, "approve", "", w, c, checks_passed=True
+            ),
+        )
+    for decision in ("Approve", "APPROVE", " approve", "approve "):
+        refused(gk, lambda d=decision: gk.decide(gate, REQ, d, "", HUMAN, "form"))
+    assert gk.decide(gate, REQ, "approve", "", HUMAN, "form").actor == HUMAN  # control
+
+
+# --- the escalation gate from every task state (spec §3, §8, §12, D27) --------------------------------------------
+
+UNREACHED = (
+    "pending",
+    "planning",
+    "awaiting_plan",
+    "plan_approved",
+    "coding",
+    "testing",
+    "passed",
+    "awaiting_result",
+    "approved",
+    "held",
+    "blocked",
+    "planning_after_a_failed_attempt",
+)
+REACHED = (
+    "failed",
+    "rejected",
+    "escalated_after_failing",
+    "escalated_after_rejection",
+    "escalated_by_a_stop",
+    "escalated_at_the_cap",
+    "call_for_edit_before_filing_failed",
+    "call_for_edit_before_filing_rejected",
+    "call_for_edit_after_filing",
+    "escalated_after_an_edit",
+)
+_TWO_FAILURES = (
+    "planning_after_a_failed_attempt",
+    "failed",
+    "escalated_after_failing",
+    "call_for_edit_before_filing_failed",
+    "blocked",
+    "call_for_edit_after_filing",
+    "escalated_after_an_edit",
+)
+
+
+def drive(gk: Gatekeeper, target: str) -> tuple[str, TaskState]:
+    """Bring a task to `target` with T08's events (setup; never through decide). Return the task and its state.
+
+    T1 (2 attempts) is the one driven; T2 depends on T1 (it is the `blocked` one); T9 stays pending, so the
+    requirement stays in progress.
+    """
+    in_progress(gk, {"T1": [], "T2": ["T1"], "T9": []}, ma=2)
+    if target == "pending":
+        return "T1", T.PENDING
+    put(gk, "task_started", "T1")
+    if target == "planning":
+        return "T1", T.PLANNING
+    put(gk, "plan_drafted", "T1")
+    if target == "awaiting_plan":
+        return "T1", T.AWAITING_PLAN
+    if (
+        target == "escalated_at_the_cap"
+    ):  # the spending cap escalates from any unfinished state (FR18)
+        gk.log.append(ev.escalation(REQ, reason="cap reached", task="T1"))
+        return "T1", T.ESCALATED
+    rec(gk, "plan", task="T1")
+    if target == "plan_approved":
+        return "T1", T.PLAN_APPROVED
+    gk.log.append(ev.attempt_started(REQ, "T1", 1))
+    if target == "coding":
+        return "T1", T.CODING
+    if target == "held":
+        put(gk, "agent.stopped", "T1", then="hold", reason="no progress")
+        return "T1", T.HELD
+    if target == "escalated_by_a_stop":
+        put(gk, "agent.stopped", "T1", then="escalate", reason="looping")
+        return "T1", T.ESCALATED
+    put(gk, "coding_finished", "T1")
+    if target == "testing":
+        return "T1", T.TESTING
+    if target in _TWO_FAILURES:
+        gk.log.append(ev.attempt_finished(REQ, "T1", 1, outcome="failed"))
+        if target == "planning_after_a_failed_attempt":
+            return "T1", T.PLANNING
+        put(gk, "plan_drafted", "T1")
+        rec(gk, "plan", task="T1")
+        gk.log.append(ev.attempt_started(REQ, "T1", 2))
+        put(gk, "coding_finished", "T1")
+        gk.log.append(ev.attempt_finished(REQ, "T1", 2, outcome="failed"))
+        if target == "failed":
+            return "T1", T.FAILED
+        if target == "call_for_edit_before_filing_failed":
+            put(gk, ev.ATTACHMENT_MISSING, "T1", missing=["report.md"])
+            return "T1", T.CALL_FOR_EDIT
+        gk.log.append(ev.escalation(REQ, reason="all attempts failed", task="T1"))
+        if target == "escalated_after_failing":
+            return "T1", T.ESCALATED
+        if target == "blocked":
+            return "T2", T.BLOCKED
+        put(gk, ev.EDIT_REQUESTED, "T1", question="which test fails first?")
+        if target == "call_for_edit_after_filing":
+            return "T1", T.CALL_FOR_EDIT
+        put(gk, ev.EDIT_DONE, "T1")
+        return "T1", T.ESCALATED  # escalated_after_an_edit
+    gk.log.append(ev.attempt_finished(REQ, "T1", 1, outcome="passed"))
+    if target == "passed":
+        return "T1", T.PASSED
+    put(gk, "result_requested", "T1")
+    if target == "awaiting_result":
+        return "T1", T.AWAITING_RESULT
+    if target == "approved":
+        rec(gk, "result", task="T1")
+        return "T1", T.APPROVED
+    rec(gk, "result", "reject", task="T1", comments="wrong approach")
+    if target == "rejected":
+        return "T1", T.REJECTED
+    if target == "call_for_edit_before_filing_rejected":
+        put(gk, ev.ATTACHMENT_MISSING, "T1", missing=["plan.md"])
+        return "T1", T.CALL_FOR_EDIT
+    gk.log.append(ev.escalation(REQ, reason="rejected", task="T1"))
+    return "T1", T.ESCALATED  # escalated_after_rejection
+
+
+def test_a2_drive_covers_every_task_state(tmp_path: Path) -> None:
+    seen = set()
+    for i, target in enumerate((*UNREACHED, *REACHED)):
+        gk = gk_for(tmp_path, sub=f"s{i}")
+        task, state = drive(gk, target)
+        assert task_state(gk, task) is state, target
+        seen.add(state)
+    assert seen == set(TaskState)
+
+
+ESCALATION_KINDS = [
+    ("auto", "auto", "approve"),
+    (HUMAN, "form", "approve"),
+    (HUMAN, "terminal", "approve"),
+    (HUMAN, "form", "reject"),
+    (HUMAN, "terminal", "changes"),
+]
+
+
+@pytest.mark.parametrize("target", UNREACHED)
+@pytest.mark.parametrize(("who", "channel", "decision"), ESCALATION_KINDS)
+def test_a2_escalation_is_refused_before_the_task_reaches_it(
+    tmp_path: Path, target: str, who: str, channel: str, decision: str
+) -> None:
+    gk = gk_for(tmp_path)  # escalation is auto by default
+    task, state = drive(gk, target)
+    assert task_state(gk, task) is state
+    assert not gate_reached(evs(gk), "escalation", task)
+    refused(
+        gk,
+        lambda: gk.decide(
+            "escalation", task, decision, "why", who, channel, checks_passed=True
+        ),
+    )
+
+
+@pytest.mark.parametrize("target", REACHED)
+@pytest.mark.parametrize(
+    ("who", "channel"), [("auto", "auto"), (HUMAN, "form"), (HUMAN, "terminal")]
+)
+def test_a2_escalation_is_taken_once_the_task_reaches_it(
+    tmp_path: Path, target: str, who: str, channel: str
+) -> None:
+    gk = gk_for(tmp_path)
+    task, state = drive(gk, target)
+    assert task_state(gk, task) is state
+    assert gate_reached(evs(gk), "escalation", task)
+    before = fold(evs(gk))
+    event = gk.decide(
+        "escalation", task, "approve", "", who, channel, checks_passed=who == "auto"
+    )
+    assert event.task == task
+    assert event.actor == who
+    assert event.data["gate"] == "escalation"
+    assert (
+        fold(evs(gk)) == before
+    )  # §3: escalating is the engine's move, not the gate's
+
+
+def test_a2_a_forged_escalation_decision_never_counts_as_reached(
+    tmp_path: Path,
+) -> None:
+    gk = gk_for(tmp_path)  # escalation is auto
+    in_progress(gk, {"T1": [], "T9": []}, ma=1)
+    at_plan(gk, "T1")
+    rec(gk, "escalation", task="T1", actor="auto", channel="auto")
+    forge(
+        gk,
+        ev.GATE_DECISION,
+        {
+            "gate": "escalation",
+            "decision": "approve",
+            "channel": "form",
+            "comments": "",
+            "version": None,
+        },
+        task="T1",
+        extra={"reached": True},
+    )
+    assert not gate_reached(evs(gk), "escalation", "T1")
+    for who, ch in (("auto", "auto"), (HUMAN, "form")):
+        refused(
+            gk,
+            lambda w=who, c=ch: gk.decide(
+                "escalation", "T1", "approve", "", w, c, checks_passed=True
+            ),
+        )
+    change = gk.change_gate("escalation", "human", who=HUMAN)
+    assert "T1" not in change.data["reached_tasks"]
+    assert gk.settings().mode("escalation", "T1") == "human"
+    run_attempt(gk, "T1", 1, "failed")
+    assert task_state(gk, "T1") is T.FAILED
+    refused(gk, lambda: auto_decide(gk, "escalation", "T1"))
+    assert (
+        gk.decide("escalation", "T1", "approve", "file it", HUMAN, "form").task == "T1"
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["failed", "rejected", "escalated_after_failing", "call_for_edit_after_filing"],
+)
+def test_a2_a_repeat_escalation_decision_never_changes_state(
+    tmp_path: Path, target: str
+) -> None:
+    """§8: the escalation gate confirms before a Jira ticket is created; D27/§12 make a repeat `escalation` record
+    (the Jira key, a retried filing) a no-op. So a second decision on the same task's gate may at most be recorded:
+    it never moves the task or the requirement, never counts as an attempt, and the gate keeps the mode the task had
+    when it reached it. (Whether a repeat should be refused outright is for the owner; see the report.)"""
+    gk = gk_for(tmp_path)
+    task, _ = drive(gk, target)
+    auto_decide(gk, "escalation", task)
+    settled = fold(evs(gk))
+    for who, ch, decision in (
+        ("auto", "auto", "approve"),
+        (HUMAN, "form", "approve"),
+        (HUMAN, "terminal", "reject"),
+        (HUMAN, "form", "changes"),
+    ):
+        before = gk.log.path.read_bytes()
+        try:
+            gk.decide(
+                "escalation",
+                task,
+                decision,
+                "again",
+                who,
+                ch,
+                checks_passed=who == "auto",
+            )
+        except ValueError:
+            assert gk.log.path.read_bytes() == before
+        assert fold(evs(gk)) == settled
+    gk.change_gate("escalation", "human", who=HUMAN)
+    assert gk.settings().mode("escalation", task) == "auto"
+    assert fold(evs(gk)) == settled
+
+
+# --- the maintain gate: what holds whatever T33 defines as reaching it --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["submitted", "awaiting_intent", "spec_drafting", "in_progress", "complete"],
+)
+def test_a2_a_maintain_decision_never_moves_the_pipeline(
+    tmp_path: Path, stage: str
+) -> None:
+    gk = gk_for(tmp_path)  # maintain is auto by default
+    if stage == "awaiting_intent":
+        at_intent(gk)
+    elif stage == "spec_drafting":
+        put(gk, "spec_started")
+    elif stage == "in_progress":
+        in_progress(gk, {"T1": []})
+        at_plan(gk, "T1")
+    elif stage == "complete":
+        complete(gk)
+    before = fold(evs(gk))
+    for who, ch, decision in (
+        ("auto", "auto", "approve"),
+        (HUMAN, "form", "approve"),
+        (HUMAN, "form", "reject"),
+        (HUMAN, "terminal", "changes"),
+    ):
+        raw = gk.log.path.read_bytes()
+        try:
+            gk.decide(
+                "maintain", REQ, decision, "c", who, ch, checks_passed=who == "auto"
+            )
+        except ValueError:
+            assert gk.log.path.read_bytes() == raw
+        assert fold(evs(gk)) == before
+
+
+def test_a2_auto_maintain_follows_the_requirements_mode(tmp_path: Path) -> None:
+    strict = gk_for(tmp_path, {"preset": "strict"}, sub="strict")
+    refused(strict, lambda: auto_decide(strict, "maintain"))
+    changed = gk_for(
+        tmp_path, sub="changed"
+    )  # auto by default, set human before any maintain decision
+    changed.change_gate("maintain", "human", who=HUMAN)
+    refused(changed, lambda: auto_decide(changed, "maintain"))
+    assert changed.decide("maintain", REQ, "approve", "", HUMAN, "form").actor == HUMAN
+    default = gk_for(tmp_path, sub="default")
+    refused(
+        default,
+        lambda: default.decide("maintain", REQ, "approve", "", "auto", "auto"),
+    )
+    for who in NOT_HUMAN:
+        refused(
+            default,
+            lambda w=who: default.decide(
+                "maintain", REQ, "approve", "", w, "form", checks_passed=True
+            ),
+        )
+    assert auto_decide(default, "maintain").actor == "auto"
