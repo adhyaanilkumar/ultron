@@ -119,7 +119,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R2 | First implementation | Failed (3 tests): tasks.md truncated before finding the task section; no fence-closing rule in prompts; NUL bytes in prompts |
 | 2 | R3 | Find the task section in the full text, truncate after; one rule sentence on sha256 fence ends in the common prompt; control characters replaced in prompt text (hash raw bytes); `truncated` flag; omitted instruction files recorded | Failed (3 tests): C1 controls (U+0080–U+009F) reach the prompt; surrogate-escaped folder name breaks the agent_call event; BOM before `### T1` |
-| 3 | R4 | Clean C1 too; write paths safely (escape surrogates) in the record and event; tolerate a leading BOM and CR-only line ends in tasks.md; bidi controls neutralised in fence labels; unloggable events refused before the call | Developer green (3386 passed, all of test_t18.py); in testing |
+| 3 | R4 | Clean C1 too; write paths safely (escape surrogates) in the record and event; tolerate a leading BOM and CR-only line ends in tasks.md; bidi controls neutralised in fence labels; unloggable events refused before the call | Passed: 269 T18 acceptance tests, 3454 total; 60 of 68 new tests fail on attempt-2 code |
 | 2026-11-11 | attempt | T10 attempt 1 (R3) | engine | fail | 4 failed, 3538 passed: a config_change in the log can show a locked gate as auto; auto approval at the escalation gate accepted for a task that isn't failing; climb to R4 |
 
 ### T10 · Gates
