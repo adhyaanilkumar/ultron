@@ -64,7 +64,7 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R2 | First implementation | Failed (2 tests): repeat escalation (Jira ticket) record after the requirement settled raised `IllegalTransition` |
-| 2 | R3 | Repeat escalation for an already-escalated task checked first and made a no-op; a first escalation on a settled requirement stays illegal | Developer green; in testing |
+| 2 | R3 | Repeat escalation for an already-escalated task checked first and made a no-op; a first escalation on a settled requirement stays illegal | Passed: 163/163 T08 acceptance tests (24 new); new tests fail on attempt-1 code for the right reason |
 
 ### T13 · Usage and caps (correction, not a failed attempt)
 | Attempt | Rung | What was different | Result |
