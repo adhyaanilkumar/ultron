@@ -14,7 +14,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-UV_DIR = r"C:\Users\Anil Kumar ML\.local\bin"
 MSYS = r"C:\msys64\usr\bin"
 COMPONENTS = [
     "mcp",
@@ -32,12 +31,34 @@ COMPONENTS = [
 ]
 
 
+def _find_uv() -> str:
+    """uv on PATH, else the per-user install (from %USERPROFILE%, not hardcoded)."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    home = os.environ.get("USERPROFILE") or str(Path.home())
+    for name in ("uv.exe", "uv"):
+        cand = Path(home) / ".local" / "bin" / name
+        if cand.exists():
+            return str(cand)
+    pytest.skip("uv not found")
+
+
+def _find_make() -> str:
+    found = shutil.which("make") or shutil.which("make", path=MSYS)
+    if not found:
+        pytest.skip("make not found")
+    return found
+
+
 def _env() -> dict[str, str]:
     env = dict(os.environ)
-    env.pop(
-        "UV", None
-    )  # uv run exports UV=<path with spaces>, which Makefile `UV ?=` would pick up
-    env["PATH"] = os.pathsep.join([UV_DIR, MSYS, env.get("PATH", "")])
+    # uv run exports UV=<path with spaces>, which Makefile `UV ?=` would pick up;
+    # a parent make exports MAKEFLAGS/MAKELEVEL, which would leak into nested make.
+    for key in ("UV", "MAKEFLAGS", "MAKELEVEL", "MFLAGS"):
+        env.pop(key, None)
+    extra = [str(Path(_find_make()).parent), str(Path(_find_uv()).parent)]
+    env["PATH"] = os.pathsep.join([*extra, env.get("PATH", "")])
     return env
 
 
@@ -74,7 +95,7 @@ def test_ac1_makefile_build_recipe() -> None:
 def test_ac1_make_build_runs() -> None:
     if os.environ.get("ACC_NO_NESTED"):
         pytest.skip("nested")
-    p = _run(["make", "--no-print-directory", "build"])
+    p = _run([_find_make(), "--no-print-directory", "build"])
     assert p.returncode == 0, p.stdout + p.stderr
     assert _last_line(p) == "Build succeeded"
     assert "uv sync --locked" in p.stdout or "sync" in p.stdout
@@ -87,7 +108,7 @@ def test_ac1_build_produces_artifacts() -> None:
 
 # AC2
 def test_ac2_make_lint_runs_clean() -> None:
-    p = _run(["make", "--no-print-directory", "lint"])
+    p = _run([_find_make(), "--no-print-directory", "lint"])
     assert p.returncode == 0, p.stdout + p.stderr
     assert _last_line(p) == "Lint succeeded"
     out = (p.stdout + p.stderr).lower()
@@ -125,7 +146,7 @@ def test_ac3_failing_test_blocks_success_line() -> None:
             [
                 "make",
                 "--no-print-directory",
-                f"UV=uv --project {ROOT.as_posix()}",
+                f'UV="{Path(_find_uv()).as_posix()}" --project "{ROOT.as_posix()}"',
                 "test",
             ],
             cwd=tmp,
@@ -144,7 +165,7 @@ def test_ac3_passing_test_gives_success_line() -> None:
             [
                 "make",
                 "--no-print-directory",
-                f"UV=uv --project {ROOT.as_posix()}",
+                f'UV="{Path(_find_uv()).as_posix()}" --project "{ROOT.as_posix()}"',
                 "test",
             ],
             cwd=tmp,
@@ -156,7 +177,7 @@ def test_ac3_passing_test_gives_success_line() -> None:
 # AC4
 def test_ac4_version_matches_pyproject() -> None:
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-    p = _run(["uv", "run", "ultron", "--version"])
+    p = _run([_find_uv(), "run", "ultron", "--version"])
     assert p.returncode == 0, p.stderr
     assert version in p.stdout
     assert p.stdout.strip().split()[-1] == version
