@@ -56,6 +56,12 @@ SKIP_DIRS = frozenset(
 MAX_FILE_BYTES = 200_000
 MAX_INSTRUCTION_FILES = 50
 _TRUNCATED = "\n[ultron: file cut at 200000 bytes]\n"
+_SECTION_TRUNCATED = "\n[ultron: task section cut at 200000 bytes]\n"
+
+# C0 control characters (tab, LF and CR excepted) and DEL. A NUL breaks subprocess adapters, which pass the prompt
+# as a C string, and escape sequences could rewrite a terminal that shows the prompt.
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_LABEL_CONTROL = re.compile(r"[\x00-\x1f\x7f\u0085  ]")
 
 _ROLES_WITH_REPO_INSTRUCTIONS = frozenset(
     {"spec", "decomposition", "developer", "testing", "maintenance"}
@@ -111,10 +117,19 @@ class BuiltContext:
     prompt_version: str
     files: tuple[ContextFile, ...]
 
-    def files_record(self) -> list[dict[str, str]]:
-        """What the call record keeps: each included file's path and SHA-256 (and its kind)."""
+    omitted_files: tuple[str, ...] = ()
+    """Repo instruction files found past the cap of 50 and left out of the prompt (paths only, never read)."""
+
+    def files_record(self) -> list[dict[str, str | bool]]:
+        """What the call record keeps: each included file's path, SHA-256, kind and whether it was cut."""
         return [
-            {"path": f.path, "sha256": f.sha256, "kind": f.kind} for f in self.files
+            {
+                "path": f.path,
+                "sha256": f.sha256,
+                "kind": f.kind,
+                "truncated": f.truncated,
+            }
+            for f in self.files
         ]
 
     def call_context(
@@ -133,6 +148,7 @@ class BuiltContext:
             run=run,
             prompt_version=self.prompt_version,
             context_files=tuple(self.files_record()),
+            context_omitted=self.omitted_files,
         )
 
 
@@ -140,7 +156,29 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _clean(text: str) -> str:
+    """Text safe to put in a prompt: no NUL or other control characters, and valid UTF-8 (no lone surrogates)."""
+    text = text.encode("utf-8", errors="replace").decode("utf-8")
+    return _CONTROL.sub("�", text)
+
+
+def _clean_label(label: str) -> str:
+    """A fence label stays on its BEGIN line: line breaks and control characters become `?`."""
+    return _LABEL_CONTROL.sub("?", _clean(label))
+
+
+def _cut(text: str, marker: str) -> tuple[str, bool]:
+    """`text` cut to MAX_FILE_BYTES of UTF-8, with `marker` appended when it was cut."""
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= MAX_FILE_BYTES:
+        return text, False
+    return data[:MAX_FILE_BYTES].decode("utf-8", errors="ignore") + marker, True
+
+
 def _fence(label: str, text: str) -> str:
+    """Wrap untrusted `text` in a fence. The mark is the SHA-256 prefix of the cleaned text, as the agent sees it."""
+    label = _clean_label(label)
+    text = _clean(text)
     mark = _sha(text.encode("utf-8"))[:16]
     body = text if text.endswith("\n") else text + "\n"
     return (
@@ -155,6 +193,7 @@ class _Builder:
         self.repo = Path(inputs.repo).resolve()
         self.req = Path(inputs.requirement_dir).resolve()
         self.files: dict[str, ContextFile] = {}
+        self.omitted: list[str] = []
         self.sections: list[str] = []
 
     # -- reading
@@ -166,21 +205,27 @@ class _Builder:
         except ValueError:
             return resolved.as_posix()
 
-    def read(self, path: Path, kind: str) -> tuple[str, str]:
-        """Read `path` (inside the repo), record it, return (label, text)."""
+    def read_raw(self, path: Path) -> tuple[str, bytes]:
+        """Read all of `path` (inside the repo) without recording it. Returns (label, bytes)."""
         path = Path(path)
         resolved = path.resolve()
         if not resolved.is_relative_to(self.repo):
             raise ContextError(f"{path} is outside the repository {self.repo}")
         if not resolved.is_file():
             raise ContextError(f"{self.rel(path)} does not exist")
-        raw = resolved.read_bytes()
-        label = self.rel(path)
+        return self.rel(path), resolved.read_bytes()
+
+    def record(self, label: str, raw: bytes, kind: str, truncated: bool) -> None:
+        self.files.setdefault(label, ContextFile(label, _sha(raw), kind, truncated))
+
+    def read(self, path: Path, kind: str) -> tuple[str, str]:
+        """Read `path` (inside the repo), record it, return (label, text cut at MAX_FILE_BYTES)."""
+        label, raw = self.read_raw(path)
         truncated = len(raw) > MAX_FILE_BYTES
         text = raw[:MAX_FILE_BYTES].decode("utf-8", errors="replace")
         if truncated:
             text += _TRUNCATED
-        self.files.setdefault(label, ContextFile(label, _sha(raw), kind, truncated))
+        self.record(label, raw, kind, truncated)
         return label, text
 
     def requirement_file(self, name: str, *, required: bool = True) -> Path | None:
@@ -209,11 +254,14 @@ class _Builder:
             raise ContextError(f"role {self.role} needs a task id")
         path = self.requirement_file("tasks.md")
         assert path is not None
-        label, text = self.read(path, "requirement")
-        found = _task_block(text, task)
+        # Search the whole file: a task can sit past the size cap. Only the section is cut, if it is too long.
+        label, raw = self.read_raw(path)
+        found = _task_block(raw.decode("utf-8", errors="replace"), task)
         if found is None:
             raise ContextError(f"task {task} is not in {label}")
-        self.data(title, f"{label}#{task}", found)
+        section, truncated = _cut(found, _SECTION_TRUNCATED)
+        self.record(label, raw, "requirement", truncated)
+        self.data(title, f"{label}#{task}", section)
 
     def optional_text(self, title: str, label: str, text: str | None) -> None:
         if text and text.strip():
@@ -224,13 +272,20 @@ class _Builder:
             return
         if self.role not in _ROLES_WITH_REPO_INSTRUCTIONS:
             return
-        found = discover_repo_instructions(self.repo)
+        found = discover_repo_instructions(self.repo, limit=None)
         if not found:
             return
+        kept, rest = found[:MAX_INSTRUCTION_FILES], found[MAX_INSTRUCTION_FILES:]
         parts = [f"## {REPO_INSTRUCTIONS_HEADING}\n"]
-        for path in found:
+        for path in kept:
             label, text = self.read(path, "repo_instruction")
             parts.append(_fence(label, text))
+        if rest:
+            self.omitted.extend(self.rel(p) for p in rest)
+            parts.append(
+                f"[ultron: {len(rest)} more repository instruction files were found and left out; "
+                f"only the first {MAX_INSTRUCTION_FILES}, shallowest first, are shown]\n"
+            )
         self.sections.append("".join(parts))
 
     def finish(self) -> BuiltContext:
@@ -241,6 +296,7 @@ class _Builder:
             prompt=prompt,
             prompt_version=template.version,
             files=tuple(self.files.values()),
+            omitted_files=tuple(self.omitted),
         )
 
 
@@ -256,8 +312,13 @@ def _task_block(tasks_md: str, task: str) -> str | None:
     return tasks_md[match.start() : end].rstrip() + "\n"
 
 
-def discover_repo_instructions(repo: Path) -> list[Path]:
-    """Root and nested `CLAUDE.md` and `AGENTS.md` under `repo`. Symlinks and tool folders are skipped."""
+def discover_repo_instructions(
+    repo: Path, limit: int | None = MAX_INSTRUCTION_FILES
+) -> list[Path]:
+    """Root and nested `CLAUDE.md` and `AGENTS.md` under `repo`, shallowest first.
+
+    Symlinks and tool folders are skipped. At most `limit` paths are returned (all of them when `limit` is None).
+    """
     root = Path(repo).resolve()
     found: list[Path] = []
     for current, dirs, names in os.walk(root, followlinks=False):
@@ -274,7 +335,7 @@ def discover_repo_instructions(repo: Path) -> list[Path]:
     found.sort(
         key=lambda p: (len(p.relative_to(root).parts), p.relative_to(root).as_posix())
     )
-    return found[:MAX_INSTRUCTION_FILES]
+    return found if limit is None else found[:limit]
 
 
 # -- the seven roles

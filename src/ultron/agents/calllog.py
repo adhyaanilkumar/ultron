@@ -50,8 +50,10 @@ class CallContext:
     """The evaluation run this requirement belongs to, if any."""
     prompt_version: str | None = None
     """The prompt template version (T18), written into the `agent_call` event when set."""
-    context_files: tuple[Mapping[str, str], ...] = ()
-    """Path and SHA-256 of each file in the prompt (T18), written into the event when not empty."""
+    context_files: tuple[Mapping[str, str | bool], ...] = ()
+    """Path, SHA-256, kind and `truncated` of each file in the prompt (T18), written into the event when not empty."""
+    context_omitted: tuple[str, ...] = ()
+    """Paths of repo instruction files left out past the cap (T18), written into the event when not empty."""
 
 
 def _sha(text: str) -> str:
@@ -148,6 +150,8 @@ class LoggingRunner:
             event.data["prompt_version"] = context.prompt_version
         if context.context_files:
             event.data["context_files"] = [dict(f) for f in context.context_files]
+        if context.context_omitted:
+            event.data["context_omitted"] = list(context.context_omitted)
         self._log.append(event)
         return result
 
