@@ -86,3 +86,48 @@ accepted; that is harmless because it changes no state. The Jira key itself is n
 
 **Proof.** `pytest tests/engine/test_states.py` (new tests) and `pytest tests/acceptance/test_t08.py` (all pass), then
 `make build`, `make lint`, `make test`.
+
+## Rerun for D27 (R3)
+Author: developer agent (R3, owner send-back, not a counted attempt). Attempt 2 passed all 163 acceptance tests; its
+code stays. This adds only what owner decision D27 needs (spec §3 task states, §12 "Check, then file" and "Call for
+edit after filing", T08 AC6).
+
+**New state and events.** `TaskState.CALL_FOR_EDIT = "call_for_edit"`. Three new event types, each its own trigger,
+as constants in `store/events.py` beside the others (the module invites later tasks to add types):
+- `ATTACHMENT_MISSING = "attachment_missing"`: the engine's pre-filing attachment check found a file missing.
+- `EDIT_REQUESTED = "edit_requested"`: the user's question through `ultron_call_for_edit` (human-confirmed).
+- `EDIT_DONE = "edit_done"`: the task's developer agent finished the edit (file added, or answer attached).
+
+**Table (strict §3, four new rows).** `failed`/`rejected` + `attachment_missing` → `call_for_edit`;
+`call_for_edit` + `edit_done` → `escalated`; `escalated` + `edit_requested` → `call_for_edit`. Nothing else leaves
+`call_for_edit`: no attempt events, no hold/retry, no `escalation` (the engine records `edit_done` to leave it). The
+existing rows stay, so `failed`/`rejected` + `escalation` → `escalated` (attachments all present) is unchanged.
+
+**Fold.**
+- `TaskStatus` gains `edit_from` (default `None`): the state `call_for_edit` was entered from (`failed`, `rejected` or
+  `escalated`), like `held_from`. Attempt count is never touched by these events (not an attempt, §3).
+- A task is **filed** when it is `escalated`, or in `call_for_edit` entered from `escalated`. For a filed task,
+  `edit_requested`, `edit_done` and `escalation` are applied whatever the requirement's state, so a requirement that
+  already settled (`partial`/`escalated`) still folds the same way when call-for-edit round trips (and ticket records)
+  come after it. A repeated `escalation` record (Jira key, retried filing) on a filed task stays a no-op, also while
+  it is in `call_for_edit`.
+- For settling and blocking, a filed `call_for_edit` task counts as `escalated`, so the requirement's outcome doesn't
+  depend on when the user asks a question. A pre-filing `call_for_edit` task (from `failed`/`rejected`) is unfinished.
+- Pre-filing round trips need the requirement `in_progress` (they always are: the task is unfinished).
+
+**Files.** `src/ultron/engine/states.py`, `src/ultron/store/events.py` (three constants),
+`tests/engine/test_states.py`. Acceptance tests untouched.
+
+**Order.** Unit tests first (red): table rows and every other `call_for_edit` pair illegal; fold for both paths;
+attempt count unchanged; double request and `edit_done` on `escalated` illegal; replay after settling (partial and
+escalated), with interleaved ticket records; settling while a filed task is in `call_for_edit`. Then code (green),
+then `make build`, `make lint`, `make test`.
+
+**Risks.** A stop of the developer agent while in `call_for_edit` (`agent.stopped`) is illegal in the fold; the engine
+must record `edit_done` instead (to settle in T25/T26). `attachment_missing` is legal only from `failed`/`rejected`
+(strict §3); escalations from a stop or the cap file without that check unless a later decision widens it. The
+acceptance table pins (`LEGAL_TASK`, `UNIVERSE`) don't name the new triggers, so they should still pass; any that
+fail are listed in the report for the testing agent.
+
+**Proof (AC6).** `pytest tests/engine/test_states.py` (new table and fold tests), `pytest tests/acceptance/test_t08.py`,
+then `make build`, `make lint`, `make test`.
