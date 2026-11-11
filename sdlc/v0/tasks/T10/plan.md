@@ -50,11 +50,11 @@ No edits to T04/T05/T08 code or tests, `tests/acceptance/`, `tasks.md`, `tasks.j
 3. `make build`, `make lint`, `make test`.
 
 ## Interpretations (spec silent or in conflict)
-- **AC6 for `intent` conflicts with T08.** T08 chose strict §3 (no `changes` loop at the `intent` gate) and its
-  acceptance test pins `intent.changes` as illegal. T10 must not change T08, so `request_changes` on `intent` raises
-  `IllegalTransition` and writes nothing. The gate table still names `intake_drafting` as intent's drafting state; the
-  AC6 intent case is a strict `xfail` test that will start failing (and so must be un-marked) once T08 adds the edge.
-  Reported to the owner.
+- **AC6 for `intent` (resolved by D28).** Attempt 1 found T08 had chosen strict §3 (no `changes` loop at the `intent`
+  gate), so the intent case was a strict `xfail`. The owner decided D28 (the intent gate allows Request changes:
+  `awaiting_intent` + `intent.changes` → `intake_drafting`); T08 added the edge and was merged in. The xfail marker is
+  removed and the interim "intent changes writes nothing" test deleted; `gates.py` needed no change (the gate table
+  already named `intake_drafting`).
 - "A failing task is never auto-approved" applies to approval of the task's work. The `escalation` gate (default
   `auto`) exists for failed and rejected tasks, so `auto` is allowed there. A revised plan after a failed attempt may
   pass an `auto` `plan` gate (otherwise `unattended` evaluation could never retry); the task is not failing, it is on
@@ -79,4 +79,4 @@ No edits to T04/T05/T08 code or tests, `tests/acceptance/`, `tasks.md`, `tasks.j
 - AC3: `auto` on `merge`/`deploy`/`rollback` raises; `auto` on a task whose attempt failed raises; nothing is written.
 - AC4: every decision event has who, time, channel, decision, comment; `spec` has the version.
 - AC5: regenerate `decisions.md` twice, compare bytes; rows in event order.
-- AC6: one case each for `spec` and `plan` (drafting state + comment for the next run); `intent` strict xfail (above).
+- AC6: one case each for `spec` and `plan` and `intent` (drafting state + comment for the next run; intent after D28).

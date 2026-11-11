@@ -633,26 +633,14 @@ def test_ac6_plan_changes_returns_to_planning(tmp_path: Path) -> None:
     assert gk.feedback("plan", "T1") is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=IllegalTransition,
-    reason="T08 pins intent.changes illegal (strict §3); needs a T08 change, reported",
-)
 def test_ac6_intent_changes_returns_to_intake_drafting(tmp_path: Path) -> None:
     gk = keeper(tmp_path)
     to_awaiting_intent(gk)
     new_state = gk.request_changes("intent", REQ, "it's about Windows", HUMAN, "form")
     assert new_state is R.INTAKE_DRAFTING
     assert gk.feedback("intent", REQ) == "it's about Windows"
-
-
-def test_ac6_intent_changes_today_writes_nothing(tmp_path: Path) -> None:
-    gk = keeper(tmp_path)
-    to_awaiting_intent(gk)
-    count = len(events(gk))
-    with pytest.raises(IllegalTransition):
-        gk.request_changes("intent", REQ, "it's about Windows", HUMAN, "form")
-    assert len(events(gk)) == count
+    add(gk, "intent_drafted")
+    assert gk.feedback("intent", REQ) is None  # consumed by the next draft
 
 
 def test_ac6_changes_needs_a_comment(tmp_path: Path) -> None:
