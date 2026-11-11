@@ -118,3 +118,10 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R2 | First implementation | Failed (3 tests): tasks.md truncated before finding the task section; no fence-closing rule in prompts; NUL bytes in prompts |
 | 2 | R3 | Find the task section in the full text, truncate after; one rule sentence on sha256 fence ends in the common prompt; strip NULs from prompt text (hash raw bytes) | In progress |
+| 2026-11-11 | attempt | T10 attempt 1 (R3) | engine | fail | 4 failed, 3538 passed: a config_change in the log can show a locked gate as auto; auto approval at the escalation gate accepted for a task that isn't failing; climb to R4 |
+
+### T10 · Gates
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R3 | First implementation; AC6 intent finished after D28 | Failed (4 tests): `config_change` could make merge/deploy/rollback read as auto; escalation-gate decision accepted for a task not failed/rejected |
+| 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected tasks | In progress |
