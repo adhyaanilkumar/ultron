@@ -305,6 +305,8 @@ Spec §3 (states), §7.2 (ids), NFR1. Pure transition functions for requirements
   - verify_with: `pytest` — `tests/engine/test_ids.py`: regex, local date, forced collision
 - AC6 (added 2026-11-11): `failed` and `rejected` move to `escalated` automatically; with a missing attachment they pass through `call_for_edit` first. `escalated` → `call_for_edit` (user's question) → `escalated` is legal; `call_for_edit` is not an attempt and doesn't change the attempt count.
   - verify_with: `pytest` — table and fold tests for every call_for_edit transition
+- AC7 (added 2026-11-11): D29: `agent.stopped` in `call_for_edit` returns the task to `edit_from` with no attempt counted; `attachment_missing` is legal from every state that escalates (failed, rejected, held, any unfinished state at the cap, a stop with `then=escalate`); `call_for_edit` + `attachment_missing` starts a second round; after two rounds, or at the spending cap, the task is filed (`escalated`) noting the missing file.
+  - verify_with: `pytest` — table and fold tests for every D29 transition and replay at every prefix
 
 **Rubric**
 | Factor | Score | Reason |
@@ -947,6 +949,8 @@ Spec FR13, §12, §3, FR18. When a task fails `max_attempts` times, is rejected,
   - verify_with: `pytest` — engine test with the agent and Jira client faked
 - AC8 (added 2026-11-11): `ultron_call_for_edit` on an escalated task runs its developer agent with the question, attaches the answer to the ticket with a comment of at most 280 characters, and returns the task to `escalated`.
   - verify_with: `pytest` — engine test with the agent and Jira client faked
+- AC9 (added 2026-11-11): D29: every escalation reason runs the attachment check; a second missing-file round runs once; after it, or when the cap is reached during `call_for_edit`, the ticket is filed with a ≤280-character note naming the missing file; a stop during `call_for_edit` returns the task to where it came from.
+  - verify_with: `pytest` — engine test with the agent and Jira client faked, one case per edge
 
 **Rubric**
 | Factor | Score | Reason |

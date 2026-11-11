@@ -990,6 +990,18 @@
               "detail": "table and fold tests for every call_for_edit transition"
             }
           ]
+        },
+        {
+          "id": "AC7",
+          "text": "D29: `agent.stopped` in `call_for_edit` returns the task to `edit_from` with no attempt counted; `attachment_missing` is legal from every state that escalates (failed, rejected, held, any unfinished state at the cap, a stop with `then=escalate`); `call_for_edit` + `attachment_missing` starts a second round; after two rounds, or at the spending cap, the task is filed (`escalated`) noting the missing file.",
+          "needs_owner": false,
+          "added": "2026-11-11",
+          "verify_with": [
+            {
+              "method": "pytest",
+              "detail": "table and fold tests for every D29 transition and replay at every prefix"
+            }
+          ]
         }
       ],
       "depends_on": [
@@ -3180,6 +3192,18 @@
             {
               "method": "pytest",
               "detail": "engine test with the agent and Jira client faked"
+            }
+          ]
+        },
+        {
+          "id": "AC9",
+          "text": "D29: every escalation reason runs the attachment check; a second missing-file round runs once; after it, or when the cap is reached during `call_for_edit`, the ticket is filed with a ≤280-character note naming the missing file; a stop during `call_for_edit` returns the task to where it came from.",
+          "needs_owner": false,
+          "added": "2026-11-11",
+          "verify_with": [
+            {
+              "method": "pytest",
+              "detail": "engine test with the agent and Jira client faked, one case per edge"
             }
           ]
         }
@@ -6296,6 +6320,11 @@
       "date": "2026-11-11",
       "reason": "owner decisions D27 (call_for_edit, short tickets) and Jira test project AK",
       "changes": "T08 AC6, T25 AC9-AC10, T26 AC7-AC8, T38 AC10 added; T25 AC6-AC8 moved from AD to AK; no ids, dependencies, rubric scores or rungs changed"
+    },
+    {
+      "date": "2026-11-11",
+      "reason": "owner decision D29 (call_for_edit edge cases)",
+      "changes": "T08 AC7, T26 AC9 added"
     }
   ]
 }

@@ -19,12 +19,25 @@ A **trigger** is a string. Most are the event type (`plan_drafted`). A gate deci
 - `edit_requested`: after filing, the user's question, `escalated` → `call_for_edit`; then `edit_done` (the answer is
   attached) → `escalated`.
 
+D29 (spec §3, §12) settles the edge cases:
+
+- every escalation reason runs the attachment check, so `attachment_missing` is legal from every escalatable state
+  (failed, rejected, held, any unfinished state at the spending cap, the agent states for a stop with
+  `then=escalate`);
+- `edit_stopped` (`EDIT_STOPPED`): `agent.stopped` (any `then`) in `call_for_edit` returns the task to `edit_from`,
+  where it came from; never an attempt;
+- `attachment_missing` in `call_for_edit` (still missing after the edit) starts another round, up to
+  `EDIT_ROUNDS_MAX`; the round is `TaskStatus.edit_round`;
+- `filed_with_missing` ("file anyway", `FILED_WITH_MISSING`): `call_for_edit` → `escalated`, the ticket noting the
+  missing file. Its `reason` is `cap` (the spending cap was reached during the edit, any round) or `edit_rounds`
+  (only in the last round). Both are legal only before filing.
+
 A task is **filed** when it is `escalated`, or in `call_for_edit` entered from `escalated`. A filed task counts as
 `escalated` for blocking and settling, so the requirement's outcome does not depend on when a question is asked.
 
 Requirements settle by themselves: `all_approved`, `partly_approved` or `none_approved`. After that, task events
 are illegal, except on a filed task: a repeated `escalation` record (the Jira key, a retried filing; spec §12) is a
-no-op, and `edit_requested` / `edit_done` round trips are applied without unsettling the requirement.
+no-op, and `edit_requested` / `edit_done` (or a stop) round trips are applied without unsettling the requirement.
 Event types outside this vocabulary (`intake`, `agent_call`, `config_snapshot`, merge and deploy gates) are ignored.
 """
 
@@ -43,9 +56,17 @@ from ultron.store.events import (
     EDIT_DONE,
     EDIT_REQUESTED,
     ESCALATION,
+    FILED_REASON_EDIT_ROUNDS,
+    FILED_REASONS,
+    FILED_WITH_MISSING,
     GATE_DECISION,
     Event,
 )
+
+EDIT_STOPPED = "edit_stopped"
+"""D29: the trigger for `agent.stopped` while in `call_for_edit`; returns the task to `edit_from`."""
+EDIT_ROUNDS_MAX = 2
+"""D29: `call_for_edit` rounds for a missing attachment before the task is filed noting it."""
 
 
 class IllegalTransition(ValueError):
@@ -160,13 +181,17 @@ TASK_TRANSITIONS: Mapping[tuple[TaskState, str], TaskState] = MappingProxyType(
         (T.TESTING, "agent_held"): T.HELD,
         # rejected and failed lead to escalated; so do a stop with then=escalate (§9.1) and the cap (FR18)
         **{(state, "escalation"): T.ESCALATED for state in _ESCALATABLE},
-        # D27: an attachment missing before filing, or the user's question after it; never an attempt
-        (T.FAILED, ATTACHMENT_MISSING): T.CALL_FOR_EDIT,
-        (T.REJECTED, ATTACHMENT_MISSING): T.CALL_FOR_EDIT,
+        # D27: an attachment missing before filing, or the user's question after it; never an attempt.
+        # D29: every escalation runs the check first, so from every escalatable state.
+        **{(state, ATTACHMENT_MISSING): T.CALL_FOR_EDIT for state in _ESCALATABLE},
         (T.ESCALATED, EDIT_REQUESTED): T.CALL_FOR_EDIT,
         (T.CALL_FOR_EDIT, EDIT_DONE): T.ESCALATED,
+        # D29: still missing after the edit starts another round; at the cap or after the last round, file anyway
+        (T.CALL_FOR_EDIT, ATTACHMENT_MISSING): T.CALL_FOR_EDIT,
+        (T.CALL_FOR_EDIT, FILED_WITH_MISSING): T.ESCALATED,
     }
 )
+_EDIT_ORIGINS = frozenset({*_ESCALATABLE, T.ESCALATED})
 
 _RESUMABLE = (T.PLANNING, T.CODING, T.TESTING)
 _SETTLED_TASKS = frozenset({T.APPROVED, T.ESCALATED, T.BLOCKED})
@@ -183,12 +208,23 @@ def next_requirement_state(state: RequirementState, trigger: str) -> Requirement
 
 
 def next_task_state(
-    state: TaskState, trigger: str, *, held_from: TaskState | None = None
+    state: TaskState,
+    trigger: str,
+    *,
+    held_from: TaskState | None = None,
+    edit_from: TaskState | None = None,
 ) -> TaskState:
     """The task state after `trigger`, or `IllegalTransition`.
 
     `task_resumed` is legal only from `held`, and returns the task to `held_from` (where it stopped).
+    `edit_stopped` is legal only from `call_for_edit`, and returns the task to `edit_from` (where it came from, D29).
     """
+    if trigger == EDIT_STOPPED:
+        if state is T.CALL_FOR_EDIT and edit_from in _EDIT_ORIGINS:
+            return edit_from
+        raise IllegalTransition(
+            f"illegal transition: task in {state.value} cannot take {EDIT_STOPPED!r}"
+        )
     if trigger == "task_resumed":
         if state is T.HELD and held_from in _RESUMABLE:
             return held_from
@@ -236,7 +272,9 @@ class TaskStatus:
     depends_on: tuple[str, ...] = ()
     held_from: TaskState | None = None
     edit_from: TaskState | None = None
-    """In `call_for_edit`: the state it was entered from (`failed`, `rejected` or `escalated`)."""
+    """In `call_for_edit`: the state it was entered from (an escalatable state, or `escalated`)."""
+    edit_round: int = 0
+    """In `call_for_edit`: the round, 1 to `EDIT_ROUNDS_MAX` (D29); 0 elsewhere."""
 
     @property
     def filed(self) -> bool:
@@ -285,6 +323,7 @@ _TASK_TYPES = frozenset(
         ATTACHMENT_MISSING,
         EDIT_REQUESTED,
         EDIT_DONE,
+        FILED_WITH_MISSING,
     }
 )
 _TASK_GATES = frozenset({"plan", "result"})
@@ -372,15 +411,30 @@ def _apply_task(
         _create_task(event, name, requirement, tasks)
         return
     status = tasks.get(name)
-    if status is not None and status.filed and event.type in _AFTER_FILING_TYPES:
+    stopped_in_edit = (
+        event.type == "agent.stopped"
+        and status is not None
+        and status.state is T.CALL_FOR_EDIT
+    )
+    if (
+        status is not None
+        and status.filed
+        and (event.type in _AFTER_FILING_TYPES or stopped_in_edit)
+    ):
         # These usually arrive after the requirement settled, so they apply whatever the requirement's state.
         if event.type == ESCALATION:
             # A later record of the same escalation (the Jira key, its sprint placement, a retried filing; spec
             # §12): a no-op, also while the task is in call_for_edit.
             return
-        new_state = next_task_state(status.state, event.type)
+        if stopped_in_edit:
+            _then(event)
+        trigger = EDIT_STOPPED if stopped_in_edit else event.type
+        new_state = next_task_state(status.state, trigger, edit_from=status.edit_from)
         tasks[name] = replace(
-            status, state=new_state, edit_from=_edit_from(status, new_state)
+            status,
+            state=new_state,
+            edit_from=_edit_from(status, new_state),
+            edit_round=_edit_round(status, new_state),
         )
         return
     if requirement is not R.IN_PROGRESS:
@@ -408,16 +462,34 @@ def _apply_task(
                 f"attempt_finished outcome {outcome!r} is not passed or failed"
             )
     elif event.type == "agent.stopped":
-        then = event.data.get("then", "hold")
-        if then == "hold":
+        then = _then(event)
+        if stopped_in_edit:
+            # D29: back to where it came from, whatever `then` says
+            trigger = EDIT_STOPPED
+        elif then == "hold":
             trigger, held_from = "agent_held", status.state
         elif then == "retry":
             trigger = _failure(status)
-        elif then == "escalate":
-            trigger = "escalation"
         else:
+            trigger = "escalation"
+    elif event.type == ATTACHMENT_MISSING and status.state is T.CALL_FOR_EDIT:
+        _check_edit_open(name, status, event.type)
+        if status.edit_round >= EDIT_ROUNDS_MAX:
             raise IllegalTransition(
-                f"agent.stopped then {then!r} is not retry, hold or escalate"
+                f"{name}: no call_for_edit round after round {status.edit_round}; "
+                f"record {FILED_WITH_MISSING}"
+            )
+    elif event.type == FILED_WITH_MISSING:
+        _check_edit_open(name, status, event.type)
+        reason = event.data.get("reason")
+        if reason not in FILED_REASONS:
+            raise IllegalTransition(
+                f"{FILED_WITH_MISSING} reason {reason!r} is not one of {sorted(FILED_REASONS)}"
+            )
+        if reason == FILED_REASON_EDIT_ROUNDS and status.edit_round < EDIT_ROUNDS_MAX:
+            raise IllegalTransition(
+                f"{name}: {FILED_WITH_MISSING} for {reason} in call_for_edit round "
+                f"{status.edit_round} of {EDIT_ROUNDS_MAX}"
             )
     elif event.type == ATTEMPT_STARTED:
         attempt += 1
@@ -426,18 +498,46 @@ def _apply_task(
                 f"{name} attempt {event.attempt} started after attempt {status.attempt}"
             )
 
-    new_state = next_task_state(status.state, trigger, held_from=status.held_from)
+    new_state = next_task_state(
+        status.state, trigger, held_from=status.held_from, edit_from=status.edit_from
+    )
     if trigger == "task_started":
         _check_dependencies(name, status, tasks)
-    if new_state is not T.HELD:
-        held_from = None
+    if new_state not in (T.HELD, T.CALL_FOR_EDIT):
+        held_from = None  # kept through call_for_edit, so a stop back to held can still resume (D29)
     tasks[name] = replace(
         status,
         state=new_state,
         attempt=attempt,
         held_from=held_from,
         edit_from=_edit_from(status, new_state),
+        edit_round=_edit_round(status, new_state),
     )
+
+
+def _then(event: Event) -> str:
+    """What an `agent.stopped` asks for: `hold` (the default), `retry` or `escalate`."""
+    then = event.data.get("then", "hold")
+    if then not in ("hold", "retry", "escalate"):
+        raise IllegalTransition(
+            f"agent.stopped then {then!r} is not retry, hold or escalate"
+        )
+    return str(then)
+
+
+def _check_edit_open(name: str, status: TaskStatus, type_: str) -> None:
+    """Another round or filing anyway only happen before filing (D29); a filed task's edit answers a question."""
+    if status.state is T.CALL_FOR_EDIT and status.filed:
+        raise IllegalTransition(
+            f"illegal transition: {type_} for {name}, which is filed and in call_for_edit for a question"
+        )
+
+
+def _edit_round(status: TaskStatus, new_state: TaskState) -> int:
+    """1 on entering `call_for_edit`, one more for each further round in it, 0 when it leaves."""
+    if new_state is not T.CALL_FOR_EDIT:
+        return 0
+    return status.edit_round + 1 if status.state is T.CALL_FOR_EDIT else 1
 
 
 def _edit_from(status: TaskStatus, new_state: TaskState) -> TaskState | None:

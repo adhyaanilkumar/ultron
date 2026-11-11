@@ -67,6 +67,7 @@ For every task that needs more than one attempt: what each attempt did different
 | 2 | R3 | Repeat escalation for an already-escalated task checked first and made a no-op; a first escalation on a settled requirement stays illegal | Passed: 163/163 T08 acceptance tests (24 new); new tests fail on attempt-1 code for the right reason |
 | Rerun for D27 (send-back, not counted) | R3 | Added `call_for_edit` with triggers `attachment_missing`, `edit_requested`, `edit_done`; a filed task in call_for_edit counts as escalated; not an attempt | Passed: 220 T08 acceptance tests, 1844 total |
 | Reopened for D28 (send-back, not counted) | R3 | One new requirement transition: `awaiting_intent` + `intent.changes` → `intake_drafting` | Passed: tester updated the 3 tests (owner-approved) and added the full loop; 1881 total |
+| Reopened for D29 (send-back, not counted) | R3 | `edit_stopped` returns to `edit_from`; `attachment_missing` from every escalating state; second round, `EDIT_ROUNDS_MAX = 2`; `filed_with_missing` with reason `cap` or `edit_rounds` | Passed: 491 T08 acceptance tests; 5 mutated copies each caught |
 
 ### T13 · Usage and caps (correction, not a failed attempt)
 | Attempt | Rung | What was different | Result |
@@ -107,3 +108,45 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | flaky | test_t05 lock test, test_t01 make-lint test | engine | note | each failed once under load in full runs and passed alone and on rerun (lesson L10) |
 | 2026-11-11 | result | T08 D28 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T08 (D28) into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | spec | D29 call_for_edit edge cases | adhyaanilkumar | approve | stop returns to origin; check on every escalation; file with note at cap or after a 2nd round |
+| 2026-11-11 | sent back | T05 (merged; reopens) | adhyaanilkumar | rerun | lock starvation: 1 in ~11 runs of the 4-writer test hangs to the 30 s lock timeout; make the lock fair; R4, not counted |
+| 2026-11-11 | sent back | T08 (merged; reopens) | engine | rerun | D29 transitions (AC7); R3, not counted |
+| 2026-11-11 | plan | AD-437 (T06) | adhyaanilkumar | defer | owner will take AD-437 up at the end |
+| 2026-11-11 | attempt | T18 attempt 1 (R2) | engine | fail | 3 failed, 3278 passed: tasks.md cut at 200 KB before the task section is found; prompts don't say only the END marker with the same sha256 closes a fence; NUL bytes reach the prompt; climb to R3 |
+
+### T18 · Context builder and prompts
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R2 | First implementation | Failed (3 tests): tasks.md truncated before finding the task section; no fence-closing rule in prompts; NUL bytes in prompts |
+| 2 | R3 | Find the task section in the full text, truncate after; one rule sentence on sha256 fence ends in the common prompt; control characters replaced in prompt text (hash raw bytes); `truncated` flag; omitted instruction files recorded | Failed (3 tests): C1 controls (U+0080–U+009F) reach the prompt; surrogate-escaped folder name breaks the agent_call event; BOM before `### T1` |
+| 3 | R4 | Clean C1 too; write paths safely (escape surrogates) in the record and event; tolerate a leading BOM and CR-only line ends in tasks.md; bidi controls neutralised in fence labels; unloggable events refused before the call | Passed: 269 T18 acceptance tests, 3454 total; 60 of 68 new tests fail on attempt-2 code |
+| 2026-11-11 | attempt | T10 attempt 1 (R3) | engine | fail | 4 failed, 3538 passed: a config_change in the log can show a locked gate as auto; auto approval at the escalation gate accepted for a task that isn't failing; climb to R4 |
+
+### T10 · Gates
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R3 | First implementation; AC6 intent finished after D28 | Failed (4 tests): `config_change` could make merge/deploy/rollback read as auto; escalation-gate decision accepted for a task not failed/rejected |
+| 2 | R4 | Locked gates forced human when reading any change; escalation-gate decisions (auto and human) only for failed/rejected/call_for_edit/escalated tasks, judged by current state | Failed (10 tests): a non-string mode value in the log crashes `settings()` (unhashable type) |
+| 3 | R5 | Type-check every mode value before comparing; non-strings read as human (snapshot) or are skipped (change); D30: refuse a second escalation decision | In progress |
+| 2026-11-11 | attempt | T28 attempt 1 (R1) | engine | fail | 4 failed, 3143 passed: prune crashes against an open reader on Windows; append after a torn tail loses a row; a new attempt shows the old attempt's activity; </untrusted-data> in content closes the wrapper; climb to R2 |
+
+### T28 · Activity stream and monitor
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R1 | First implementation | Failed (4 tests): prune vs open reader on Windows; torn tail swallows the next row; old attempt shown as current; untrusted wrapper can be closed by content |
+| 2 | R2 | Retry the prune replace; repair a torn tail under the lock before appending; filter by attempt and newest start; escape `untrusted-data` tags in content | Failed (9 tests): A–D fixed; new defect: a second prune can lower the high-water mark and cursors get reused |
+| 3 | R3 | Mark never lowered (`_raise_mark`, atomic write); NFKC look-alike tags defanged; temp files cleaned. `lines` left raw (tester agrees: labelled, not rewritten, per §9.1) | Passed: 3317 total; 20 of 30 new seeds fail on attempt-2 code |
+| 2026-11-11 | settings | agent types (self-build) | adhyaanilkumar | keep general-purpose | per-role agent classes go to a later version (backlog) |
+| 2026-11-11 | attempt | T18 attempt 2 (R3) | engine | fail | 3 failed, 3369 passed: C1 controls reach the prompt; a non-UTF-8 folder name breaks event logging after the call is charged; a BOM-prefixed tasks.md hides the first task; climb to R4 for attempt 3 (last) |
+| 2026-11-11 | attempt | T16 attempt 1 (R3) | engine | fail | 63 failed, 3421 passed: ~58 permission-policy bypasses (git via aliases/eval/wrappers/PowerShell quoting, shell writes to .git and outside the worktree, network via interpreters); usage-limit text matched in the agent's own result; interrupt can take 6-9 s when the session hangs; climb to R4 |
+
+### T16 · Agent SDK adapter
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R3 | Denylist permission policy with a quote-aware shell parser; post-call diff check inside the worktree | Failed (63 tests): many policy bypasses; usage-limit misclassified from the agent's text; interrupt over 5 s when the session hangs |
+| 2 | R4 | Deny-by-default Bash allowlist instead of a denylist; outside-worktree and `.git` checks after every call; classify from SDK error fields only; one overall 5 s interrupt budget; PowerShell removed; `repocheck` snapshot/compare after each call | Developer green (3717 passed, all of test_t16.py); in testing. Residual risk: agent-written code run by an allowed command |
+| 2026-11-11 | attempt | T28 attempt 2 (R2) | engine | fail | 9 failed, 3202 passed: a second prune lowers activity.seq, so new rows reuse cursors a follower already passed; climb to R3 for attempt 3 (last) |
+| 2026-11-11 | result | T08 D29 | adhyaanilkumar | approve | |
+| 2026-11-11 | merge | v0/T08 (D29) into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | attempt | T10 attempt 2 (R4) | engine | fail | 10 failed, 3964 passed: a list/object where a gate mode should be crashes settings with TypeError (fails closed); climb to R5 for attempt 3 (last) |
+| 2026-11-11 | spec | D30 escalation gate: one decision | adhyaanilkumar | approve | repeat escalation decisions refused once passed; maintain gate left to T33 |

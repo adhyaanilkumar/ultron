@@ -103,3 +103,9 @@ Decided 2026-11-11 by the owner (lesson L11 in `sdlc/v0/lessons.md`):
   - If the session can't be reopened (expired, missing, different adapter), fall back to rerunning the attempt from the worktree as now, and record which happened.
   - `ultron_resume_task` for a `held` task uses the same path, adding the user's note as a new message.
 - **Why:** in the V0 self-build, T06 (R5) and T25 hit the 5-hour limit mid-attempt and were resumed from where they stopped, which saved repeating the expensive part of the run.
+
+## Agent classes per role
+Decided 2026-11-11 by the owner (lesson L13 in `sdlc/v0/lessons.md`):
+- **What:** distinct agent types per role (developer, tester, spec, decomposition, maintenance, scout, intake), each with its own allowed tools, write scope and model, instead of one general-purpose agent steered by its prompt.
+- **Why:** in the V0 self-build, general-purpose agents wrote empty files into the main repo four times, and the "don't edit `tests/acceptance/`" and "don't edit `src/`" rules live only in prompts. A class can enforce them in its tools.
+- **For now (V0):** keep general-purpose agents; prompts carry the rules and the engine checks the main checkout before each merge.
