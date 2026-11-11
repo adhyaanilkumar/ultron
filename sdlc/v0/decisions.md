@@ -118,7 +118,8 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R2 | First implementation | Failed (3 tests): tasks.md truncated before finding the task section; no fence-closing rule in prompts; NUL bytes in prompts |
-| 2 | R3 | Find the task section in the full text, truncate after; one rule sentence on sha256 fence ends in the common prompt; control characters replaced in prompt text (hash raw bytes); `truncated` flag; omitted instruction files recorded | Developer green (3288 passed, all of test_t18.py); in testing |
+| 2 | R3 | Find the task section in the full text, truncate after; one rule sentence on sha256 fence ends in the common prompt; control characters replaced in prompt text (hash raw bytes); `truncated` flag; omitted instruction files recorded | Failed (3 tests): C1 controls (U+0080–U+009F) reach the prompt; surrogate-escaped folder name breaks the agent_call event; BOM before `### T1` |
+| 3 | R4 | Clean C1 too; write paths safely (escape surrogates) in the record and event; tolerate a leading BOM and CR-only line ends in tasks.md | In progress |
 | 2026-11-11 | attempt | T10 attempt 1 (R3) | engine | fail | 4 failed, 3538 passed: a config_change in the log can show a locked gate as auto; auto approval at the escalation gate accepted for a task that isn't failing; climb to R4 |
 
 ### T10 · Gates
@@ -134,3 +135,11 @@ For every task that needs more than one attempt: what each attempt did different
 | 1 | R1 | First implementation | Failed (4 tests): prune vs open reader on Windows; torn tail swallows the next row; old attempt shown as current; untrusted wrapper can be closed by content |
 | 2 | R2 | Retry the prune replace; repair a torn tail under the lock before appending; filter by attempt and newest start; escape `untrusted-data` tags in content | Developer green (3156 passed, all of test_t28.py); in testing |
 | 2026-11-11 | settings | agent types (self-build) | adhyaanilkumar | keep general-purpose | per-role agent classes go to a later version (backlog) |
+| 2026-11-11 | attempt | T18 attempt 2 (R3) | engine | fail | 3 failed, 3369 passed: C1 controls reach the prompt; a non-UTF-8 folder name breaks event logging after the call is charged; a BOM-prefixed tasks.md hides the first task; climb to R4 for attempt 3 (last) |
+| 2026-11-11 | attempt | T16 attempt 1 (R3) | engine | fail | 63 failed, 3421 passed: ~58 permission-policy bypasses (git via aliases/eval/wrappers/PowerShell quoting, shell writes to .git and outside the worktree, network via interpreters); usage-limit text matched in the agent's own result; interrupt can take 6-9 s when the session hangs; climb to R4 |
+
+### T16 · Agent SDK adapter
+| Attempt | Rung | What was different | Result |
+|---|---|---|---|
+| 1 | R3 | Denylist permission policy with a quote-aware shell parser; post-call diff check inside the worktree | Failed (63 tests): many policy bypasses; usage-limit misclassified from the agent's text; interrupt over 5 s when the session hangs |
+| 2 | R4 | Deny-by-default Bash allowlist instead of a denylist; outside-worktree and `.git` checks after every call; classify from SDK error fields only; one overall 5 s interrupt budget | In progress |
