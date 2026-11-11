@@ -11,6 +11,7 @@
 - **Attempts:**
   - Max 3, and each counted failure climbs one rung. A send-back doesn't climb.
   - The testing agent never runs below R1, and developers never edit `tests/acceptance/` (FR11).
+- **Rungs (self-build only, owner 2026-11-11):** spec §11.4's R0–R5, plus **R6 = Fable 5.2 high** as the new cap. A task at R5 that fails climbs to R6. `spec.md` is unchanged; ultron itself still keeps Fable off the ladder.
 - Jira is used only on escalation.
 - MCPs connected: Playwright, git, Docker MCP Toolkit, Atlassian Rovo, GitHub.
 
