@@ -424,7 +424,7 @@ Spec FR5, FR6, FR14, §11.4. The `tasks.json` schema (id, title, description, ac
 - type: feature
 - depends_on: T08, T10, T11
 - ships_independently: yes
-- jira:
+- jira: AD-440 (escalated 2026-11-11: 3 attempts failed, 1 story point)
 - rung: R3 (total 7)
 - mcp: none — plain Python logic; nothing beats `make test`/`make lint` here (mcp-research.md Cat 11)
 

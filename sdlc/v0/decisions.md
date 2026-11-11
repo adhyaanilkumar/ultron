@@ -184,7 +184,7 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R3 | First implementation (`attempts.py`, `decide()`) | Failed (19 tests): capped first rung recorded wrong; path normalisation; restart grants extra attempts |
 | 2 | R4 | Record the rung that ran (capped); full path normalisation with `PolicyError` for paths outside the repo; `for_task` from the folded status plus `from_log` rebuild; `finished_event` with reason and failures | Failed (3 tests): fingerprints differ for random hex ids and UUIDs; all three attempt-1 defects fixed; ~2,500 restart checks pass |
-| 3 | R5 | One ordered token-rule list in a single linear pass (path, UUID, time, address, hex id, number); quoted text kept only if it normalises to a short identifier | Developer green (6974 passed, all of test_t12.py); in testing |
+| 3 | R5 | One ordered token-rule list in a single linear pass (path, UUID, time, address, hex id, number); quoted text kept only if it normalises to a short identifier | Failed (1 test): crash on a lone surrogate in test ids or failure text. Escalated AD-440 |
 | 2026-11-11 | result | T28 post-merge test fix | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T28 (test fix) into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | attempt | T12 attempt 1 (R3) | engine | fail | 19 failed: history records the start rung, not the capped rung that ran; `..`, `/./`, `//` paths not normalised for tests_modified; `for_task` drops the folded attempt count, so a restart grants extra attempts; climb to R4 |
@@ -192,3 +192,5 @@ For every task that needs more than one attempt: what each attempt did different
 | 2026-11-11 | attempt | T12 attempt 2 (R4) | engine | fail | 3 failed, 6911 passed: AC4 fingerprints split on random ids (quoted hex starting with a letter; unquoted UUIDs), so the same failure twice isn't recognised; climb to R5 for attempt 3 (last) |
 | 2026-11-11 | attempt | T36 attempt 3 (R4, last) | engine | fail | 3 failed, 4835 passed: an open escape sequence in repo text cuts ultron's own text on that line; 8-bit C1 breaks monitor JSON; T28's tag check is quadratic on long whitespace; max_attempts reached |
 | 2026-11-11 | escalation | T36 → AD-439 | engine | escalate | automatic; Feature under AD-378, sprint SP-105, 3 story points |
+| 2026-11-11 | attempt | T12 attempt 3 (R5, last) | engine | fail | 1 failed (direct run 660 passed): failure_fingerprint crashes on a lone surrogate (strict encode); full make test killed by the system for low memory, not rerun; max_attempts reached |
+| 2026-11-11 | escalation | T12 → AD-440 | engine | escalate | automatic; Feature under AD-378, sprint SP-105, 1 story point (one-line fix plus pytest diff-hint lines) |

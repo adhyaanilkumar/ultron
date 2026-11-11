@@ -1503,7 +1503,7 @@
       },
       "total": 7,
       "rung": "R3",
-      "jira": "",
+      "jira": "AD-440",
       "mcp": {
         "servers": [],
         "reason": "plain Python logic; nothing beats `make test`/`make lint` here (mcp-research.md Cat 11)"
