@@ -15,8 +15,11 @@ from ultron.engine.gates import (
     CONFIG_CHANGE,
     CONFIG_WARNING,
     GATES,
+    GateChange,
     GateError,
     Gatekeeper,
+    GateSettings,
+    gate_reached,
     render_decisions,
 )
 from ultron.engine.states import (
@@ -27,11 +30,15 @@ from ultron.engine.states import (
 )
 from ultron.store.eventlog import EventLog
 from ultron.store.events import (
+    ATTACHMENT_MISSING,
     CONFIG_SNAPSHOT,
     GATE_DECISION,
     NewEvent,
     attempt_finished,
     attempt_started,
+    config_snapshot,
+    escalation,
+    gate_decision,
     user_actor,
 )
 
@@ -173,6 +180,73 @@ def to_awaiting_result(gk: Gatekeeper, task: str) -> None:
     add(gk, "coding_finished", task)
     gk.log.append(attempt_finished(REQ, task, 1, outcome="passed"))
     add(gk, "result_requested", task)
+
+
+def task_at(gk: Gatekeeper, target: TaskState) -> str:
+    """Bring a task to `target` and return its id. T1 has one attempt; T2 depends on T1 (blocked once T1 escalates)."""
+    to_in_progress(gk, {"T1": [], "T2": ["T1"]}, max_attempts=1)
+    if target is T.PENDING:
+        return "T1"
+    if target is T.PLANNING:
+        add(gk, "task_started", "T1")
+    elif target is T.AWAITING_PLAN:
+        to_awaiting_plan(gk, "T1")
+    elif target is T.PLAN_APPROVED:
+        to_awaiting_plan(gk, "T1")
+        gk.decide("plan", "T1", "approve", "", HUMAN, "form")
+    elif target is T.CODING:
+        to_coding(gk, "T1")
+    elif target is T.TESTING:
+        to_coding(gk, "T1")
+        add(gk, "coding_finished", "T1")
+    elif target is T.PASSED:
+        to_coding(gk, "T1")
+        add(gk, "coding_finished", "T1")
+        gk.log.append(attempt_finished(REQ, "T1", 1, outcome="passed"))
+    elif target is T.AWAITING_RESULT:
+        to_awaiting_result(gk, "T1")
+    elif target is T.APPROVED:
+        to_awaiting_result(gk, "T1")
+        gk.decide("result", "T1", "approve", "", HUMAN, "form")
+    elif target is T.REJECTED:
+        to_awaiting_result(gk, "T1")
+        gk.decide("result", "T1", "reject", "wrong approach", HUMAN, "form")
+    elif target is T.HELD:
+        to_coding(gk, "T1")
+        add(gk, "agent.stopped", "T1", then="hold")
+    else:  # failed, and what follows a failure
+        to_coding(gk, "T1")
+        add(gk, "coding_finished", "T1")
+        gk.log.append(attempt_finished(REQ, "T1", 1, outcome="failed"))
+        if target is T.CALL_FOR_EDIT:
+            add(gk, ATTACHMENT_MISSING, "T1", missing=["plan.md"])
+        elif target in (T.ESCALATED, T.BLOCKED):
+            gk.log.append(escalation(REQ, reason="all attempts failed", task="T1"))
+        if target is T.BLOCKED:
+            return "T2"
+    return "T1"
+
+
+AT_ESCALATION = (T.FAILED, T.REJECTED, T.CALL_FOR_EDIT, T.ESCALATED)
+"""The states in which a task has reached the escalation gate (spec §3, §12, D27, D29)."""
+NOT_AT_ESCALATION = (
+    T.PENDING,
+    T.PLANNING,
+    T.AWAITING_PLAN,
+    T.PLAN_APPROVED,
+    T.CODING,
+    T.TESTING,
+    T.PASSED,
+    T.AWAITING_RESULT,
+    T.APPROVED,
+    T.HELD,
+    T.BLOCKED,
+)
+
+
+def test_task_states_split_into_reached_and_not_reached_escalation() -> None:
+    assert set(AT_ESCALATION) | set(NOT_AT_ESCALATION) == set(TaskState)
+    assert not set(AT_ESCALATION) & set(NOT_AT_ESCALATION)
 
 
 # --- the gate table -----------------------------------------------------------------------------------------------
@@ -332,6 +406,101 @@ def test_ac2_locked_gate_cannot_be_changed_to_auto(tmp_path: Path, gate: str) ->
     assert len(events(gk)) == count
 
 
+@pytest.mark.parametrize("gate", LOCKED_GATES)
+def test_ac2_a_config_change_in_the_log_cannot_make_a_locked_gate_auto(
+    tmp_path: Path, gate: str
+) -> None:
+    gk = keeper(tmp_path, {"preset": "unattended"})
+    # change_gate refuses this; written straight to the log, it must still not count
+    gk.log.append(
+        NewEvent(
+            actor=HUMAN,
+            type=CONFIG_CHANGE,
+            requirement=REQ,
+            data={"gate": gate, "from": "human", "to": "auto", "reached": False},
+        )
+    )
+    settings = gk.settings()
+    assert settings.mode(gate) == "human"
+    assert settings.modes[gate] == "human"
+    assert [c for c in settings.changes if c.gate == gate] == []
+    before = gk.log.path.read_bytes()
+    with pytest.raises(GateError):
+        gk.decide(gate, REQ, "approve", "", "auto", "auto", checks_passed=True)
+    assert gk.log.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("gate", LOCKED_GATES)
+def test_ac2_gate_settings_keep_a_locked_gate_human_whatever_they_hold(
+    gate: str,
+) -> None:
+    settings = GateSettings(
+        max_attempts=3,
+        modes=dict.fromkeys(ALL_GATES, "auto"),
+        changes=(GateChange(gate, "auto", reached=False),),
+    )
+    assert settings.mode(gate) == "human"
+    assert settings.mode("plan") == "auto"
+
+
+@pytest.mark.parametrize("gate", LOCKED_GATES)
+def test_ac1_a_snapshot_in_the_log_cannot_make_a_locked_gate_auto(
+    tmp_path: Path, gate: str
+) -> None:
+    log = make_log(tmp_path)
+    log.append(
+        config_snapshot(REQ, max_attempts=3, gates=dict.fromkeys(ALL_GATES, "auto"))
+    )
+    settings = Gatekeeper(log, REQ).settings()
+    assert settings.mode(gate) == "human"
+    assert settings.modes[gate] == "human"
+
+
+def test_ac1_a_snapshot_mode_that_is_not_human_or_auto_reads_human(
+    tmp_path: Path,
+) -> None:
+    log = make_log(tmp_path)
+    log.append(  # the snapshot builder refuses this; written raw, it must still read safe
+        NewEvent(
+            actor="engine",
+            type=CONFIG_SNAPSHOT,
+            requirement=REQ,
+            data={
+                "max_attempts": 3,
+                "gates": {**dict.fromkeys(ALL_GATES, "auto"), "plan": "sometimes"},
+            },
+        )
+    )
+    assert Gatekeeper(log, REQ).settings().mode("plan") == "human"
+
+
+@pytest.mark.parametrize(
+    ("actor", "gate", "to"),
+    [
+        ("engine", "plan", "auto"),
+        ("agent:developer", "plan", "auto"),
+        ("auto", "plan", "auto"),
+        (HUMAN, "plan", "sometimes"),
+        (HUMAN, "bogus", "auto"),
+    ],
+)
+def test_ac2_settings_ignore_a_change_change_gate_could_not_write(
+    tmp_path: Path, actor: str, gate: str, to: str
+) -> None:
+    gk = keeper(tmp_path)  # plan is human
+    gk.log.append(
+        NewEvent(
+            actor=actor,
+            type=CONFIG_CHANGE,
+            requirement=REQ,
+            data={"gate": gate, "from": "human", "to": to, "reached": False},
+        )
+    )
+    settings = gk.settings()
+    assert settings.mode("plan") == "human"
+    assert settings.changes == ()
+
+
 @pytest.mark.parametrize("who", ["auto", "engine", "agent:developer"])
 def test_ac2_only_a_human_changes_settings(tmp_path: Path, who: str) -> None:
     gk = keeper(tmp_path)
@@ -454,6 +623,74 @@ def test_ac3_auto_escalation_is_allowed_for_a_rejected_task(tmp_path: Path) -> N
         "escalation", "T1", "approve", "", "auto", "auto", checks_passed=True
     )
     assert event.actor == "auto"
+
+
+@pytest.mark.parametrize("target", NOT_AT_ESCALATION)
+@pytest.mark.parametrize(
+    ("who", "decision"),
+    [("auto", "approve"), (HUMAN, "approve"), (HUMAN, "reject")],
+)
+def test_ac3_escalation_decision_is_refused_before_the_task_reaches_the_gate(
+    tmp_path: Path, target: TaskState, who: str, decision: str
+) -> None:
+    gk = keeper(tmp_path, {"preset": "unattended"})  # escalation is auto
+    task = task_at(gk, target)
+    assert task_state(gk, task) is target
+    assert gate_reached(events(gk), "escalation", task) is False
+    channel = "auto" if who == "auto" else "form"
+    before = gk.log.path.read_bytes()
+    with pytest.raises(GateError):
+        gk.decide("escalation", task, decision, "why", who, channel, checks_passed=True)
+    assert gk.log.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("target", AT_ESCALATION)
+@pytest.mark.parametrize("who", ["auto", HUMAN])
+def test_ac3_escalation_decision_is_taken_once_the_task_reaches_the_gate(
+    tmp_path: Path, target: TaskState, who: str
+) -> None:
+    gk = keeper(tmp_path, {"preset": "unattended"})
+    task = task_at(gk, target)
+    assert task_state(gk, task) is target
+    assert gate_reached(events(gk), "escalation", task) is True
+    channel = "auto" if who == "auto" else "terminal"
+    event = gk.decide(
+        "escalation", task, "approve", "", who, channel, checks_passed=True
+    )
+    assert event.actor == who
+    assert event.task == task
+    assert event.data["gate"] == "escalation"
+
+
+def test_ac2_an_escalation_decision_on_an_unreached_gate_does_not_count_as_reached(
+    tmp_path: Path,
+) -> None:
+    gk = keeper(tmp_path)  # escalation is auto by default
+    to_in_progress(gk, {"T1": []}, max_attempts=1)
+    to_awaiting_plan(gk, "T1")
+    # decide refuses this; written straight to the log, it must not freeze T1's mode
+    gk.log.append(
+        gate_decision(
+            REQ,
+            actor="auto",
+            gate="escalation",
+            decision="approve",
+            channel="auto",
+            task="T1",
+        )
+    )
+    assert gate_reached(events(gk), "escalation", "T1") is False
+    change = gk.change_gate("escalation", "human", who=HUMAN)
+    assert change.data["reached_tasks"] == []
+    assert gk.settings().mode("escalation", "T1") == "human"
+    # T1 now fails: it reaches the gate under the new (human) mode
+    gk.decide("plan", "T1", "approve", "", HUMAN, "form")
+    gk.log.append(attempt_started(REQ, "T1", 1))
+    gk.log.append(attempt_finished(REQ, "T1", 1, outcome="failed"))
+    assert task_state(gk, "T1") is T.FAILED
+    with pytest.raises(GateError):
+        gk.decide("escalation", "T1", "approve", "", "auto", "auto", checks_passed=True)
+    gk.decide("escalation", "T1", "approve", "file it", HUMAN, "form")
 
 
 @pytest.mark.parametrize(
