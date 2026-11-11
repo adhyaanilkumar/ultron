@@ -1,6 +1,7 @@
 """AC4: pruning removes only activity of requirements completed more than 7 days ago; cursors stay valid."""
 
 import os
+import random
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -166,3 +167,115 @@ def test_prune_gives_up_after_a_bounded_time(
         prune(tmp_path, udir, now=NOW)
     assert 2 < len(calls) < 1000, calls
     assert activity.ACTIVITY_FILE  # module still sane
+
+
+def test_a_second_prune_never_lowers_the_high_water_mark(tmp_path: Path) -> None:
+    """Defect E: prune #1 drops the newest rows, prune #2 older ones; the mark must stay at the top cursor given."""
+    finished(tmp_path, OLD, NOW - timedelta(days=30))
+    finished(tmp_path, EDGE, NOW - timedelta(days=10))
+    in_progress(tmp_path, OPEN)
+    udir = tmp_path / ".ultron"
+    append_activity(
+        udir,
+        [
+            _row(OPEN, "a"),
+            _row(EDGE, "e"),
+            _row(OPEN, "b"),
+            _row(OLD, "o1"),
+            _row(OLD, "o2"),
+        ],
+    )
+    follower = follow(udir, 0)["cursor"]
+    assert follower == 5
+    assert prune(tmp_path, udir, now=NOW, retention=timedelta(days=20)) == 2
+    assert prune(tmp_path, udir, now=NOW) == 1
+    assert (udir / "activity.seq").read_text(encoding="ascii").strip() == "5"
+    assert append_activity(udir, [_row(OPEN, "after")]) == 6
+    assert [r["text"] for r in follow(udir, follower)["activity"]] == ["after"]
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 7, 11, 42, 99, 1234, 2026])
+def test_cursors_only_go_up_over_random_appends_and_prunes(
+    tmp_path: Path, seed: int
+) -> None:
+    """Property: whatever mix of appends and prunes, every new cursor is above all cursors ever given, the stored
+    mark never drops below them, and a follower at the top sees nothing old again."""
+    rnd = random.Random(seed)
+    ages = {"R-20261101-b0b0": 40, "R-20261102-c0c0": 15, "R-20261103-d0d0": 9}
+    for req, days in ages.items():
+        finished(tmp_path, req, NOW - timedelta(days=days))
+    in_progress(tmp_path, OPEN)
+    names = [*ages, OPEN]
+    udir = tmp_path / ".ultron"
+    issued = 0
+    for step in range(80):
+        if rnd.random() < 0.6:
+            batch = [
+                _row(rnd.choice(names), f"{step}-{i}") for i in range(rnd.randint(1, 4))
+            ]
+            got = append_activity(udir, batch)
+            assert got == issued + len(batch), (step, got, issued)
+            issued = got
+        else:
+            prune(
+                tmp_path,
+                udir,
+                now=NOW,
+                retention=timedelta(days=rnd.choice([1, 5, 12, 20, 60])),
+            )
+            assert follow(udir, issued)["activity"] == []
+            mark = int((udir / "activity.seq").read_text(encoding="ascii").strip() or 0)
+            assert mark >= issued, (step, mark, issued)
+        ns = [int(r["n"]) for r in follow(udir, 0)["activity"]]
+        assert ns == sorted(set(ns)) and all(0 < x <= issued for x in ns)
+
+
+def test_a_failed_prune_leaves_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    finished(tmp_path, OLD, NOW - timedelta(days=30))
+    udir = tmp_path / ".ultron"
+    append_activity(udir, [_row(OLD, "a"), _row(OLD, "b")])
+    before = (udir / "activity.jsonl").read_bytes()
+
+    real_replace = os.replace
+
+    def deny_activity(src: object, dst: object) -> None:
+        if str(dst).endswith("activity.jsonl"):
+            raise PermissionError("denied")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", deny_activity)
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    with pytest.raises(PermissionError):
+        prune(tmp_path, udir, now=NOW)
+    assert not (udir / "activity.jsonl.tmp").exists()
+    assert (udir / "activity.jsonl").read_bytes() == before
+    monkeypatch.undo()
+    assert append_activity(udir, [_row(OPEN, "c")]) == 3
+
+
+def test_a_stale_temp_file_from_a_crashed_prune_is_replaced(tmp_path: Path) -> None:
+    finished(tmp_path, OLD, NOW - timedelta(days=30))
+    udir = tmp_path / ".ultron"
+    append_activity(udir, [_row(OLD, "a"), _row(OPEN, "b")])
+    (udir / "activity.jsonl.tmp").write_bytes(b'{"n": 99, "text": "stale"}\n')
+    assert prune(tmp_path, udir, now=NOW) == 1
+    assert not (udir / "activity.jsonl.tmp").exists()
+    assert [r["text"] for r in follow(udir, 0)["activity"]] == ["b"]
+
+
+def test_prune_before_any_activity_records_a_zero_mark_and_clears_a_stale_temp(
+    tmp_path: Path,
+) -> None:
+    udir = tmp_path / ".ultron"
+    assert prune(tmp_path, udir, now=NOW) == 0
+    assert (udir / "activity.seq").read_text(encoding="ascii").strip() == "0"
+    (udir / "activity.jsonl.tmp").write_bytes(b"stale")
+    in_progress(tmp_path, OPEN)
+    append_activity(udir, [_row(OPEN, "a")])
+    assert (
+        prune(tmp_path, udir, now=NOW) == 0
+    )  # nothing to remove, the stale temp still goes
+    assert not (udir / "activity.jsonl.tmp").exists()
+    assert append_activity(udir, [_row(OPEN, "b")]) == 2

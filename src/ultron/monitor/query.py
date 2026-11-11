@@ -7,6 +7,7 @@ repo, so a host must treat them as data, never as instructions.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,23 @@ _TAG = re.compile(r"<(?=\s*/?\s*untrusted-data)", re.IGNORECASE)
 
 
 def _defanged(text: str) -> str:
-    """Make any `untrusted-data` tag in the content inert (`<` becomes `&lt;`), so it cannot close the wrapper."""
-    return _TAG.sub("&lt;", text)
+    """Make any `untrusted-data` tag in the content inert (`<` becomes `&lt;`), so it cannot close the wrapper.
+
+    Tags are found in a view of the text where each character is NFKC-normalised and invisible format characters
+    (zero-width space, word joiner, BOM) are dropped, so look-alikes such as fullwidth `＜／` are caught too. Only the
+    character that opens a tag is replaced; everything else passes through unchanged."""
+    view: list[str] = []
+    origin: list[int] = []
+    for i, char in enumerate(text):
+        if unicodedata.category(char) == "Cf":
+            continue
+        for part in unicodedata.normalize("NFKC", char):
+            view.append(part)
+            origin.append(i)
+    opens = {origin[m.start()] for m in _TAG.finditer("".join(view))}
+    if not opens:
+        return text
+    return "".join("&lt;" if i in opens else char for i, char in enumerate(text))
 
 
 def _labelled(body: dict[str, Any]) -> dict[str, Any]:

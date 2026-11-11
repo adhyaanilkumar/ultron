@@ -85,3 +85,51 @@ def test_append_after_a_torn_tail_keeps_the_new_rows(tmp_path: Path) -> None:
     append_activity(tmp_path, [{"requirement": "R", "kind": "read", "text": "e"}])
     ns = [r["n"] for r in follow(tmp_path, 0)["activity"]]
     assert ns == sorted(set(ns))
+
+
+def _rows(*texts: str) -> list[dict[str, object]]:
+    return [{"requirement": "R", "kind": "read", "text": t} for t in texts]
+
+
+def test_a_missing_mark_is_recovered_from_the_file(tmp_path: Path) -> None:
+    append_activity(tmp_path, _rows("a", "b", "c"))
+    (tmp_path / "activity.seq").unlink()
+    assert append_activity(tmp_path, _rows("d")) == 4
+    assert (tmp_path / "activity.seq").read_text(encoding="ascii").strip() == "4"
+
+
+def test_a_corrupt_mark_is_recovered_from_the_file(tmp_path: Path) -> None:
+    append_activity(tmp_path, _rows("a", "b"))
+    for junk in ("", "abc", "-5", "1e3", "\x00\x00"):
+        (tmp_path / "activity.seq").write_text(junk, encoding="latin-1")
+        last = append_activity(tmp_path, _rows("x"))
+        ns = [r["n"] for r in follow(tmp_path, 0)["activity"]]
+        assert ns == list(range(1, last + 1)), (junk, ns)
+
+
+def test_a_stale_mark_below_the_file_is_raised_and_a_higher_mark_is_kept(
+    tmp_path: Path,
+) -> None:
+    append_activity(tmp_path, _rows("a", "b", "c"))
+    (tmp_path / "activity.seq").write_text(
+        "1", encoding="ascii"
+    )  # a writer died before updating the mark
+    assert append_activity(tmp_path, _rows("d")) == 4
+    (tmp_path / "activity.seq").write_text(
+        "50", encoding="ascii"
+    )  # rows 5..50 were pruned away
+    assert append_activity(tmp_path, _rows("e")) == 51
+
+
+def test_a_boolean_n_is_not_a_cursor(tmp_path: Path) -> None:
+    (tmp_path / "activity.jsonl").write_bytes(b'{"n": true, "text": "fake"}\n')
+    assert follow(tmp_path, 0)["activity"] == []
+    assert append_activity(tmp_path, _rows("a")) == 1
+
+
+def test_no_temp_file_is_left_beside_the_mark(tmp_path: Path) -> None:
+    append_activity(tmp_path, _rows("a"))
+    assert sorted(p.name for p in tmp_path.iterdir() if p.is_file()) == [
+        "activity.jsonl",
+        "activity.seq",
+    ]

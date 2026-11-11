@@ -61,6 +61,9 @@ Attempt 1 failed at the tester with 4 real defects. Fixes, each reproduced first
   stay. Files: `query.py`, `test_transcript.py`.
 - Also a test that `partial` requirements are pruned like `complete` ones (`test_prune.py`).
 Risks: a longer lock hold in prune while a reader keeps the file open; bounded, then the error surfaces.
+- Departure found while building: the acceptance property test can prune before any append and then reads
+  `activity.seq`, so every prune now records the mark first (creating `.ultron` and `activity.seq = 0` if needed),
+  not only a prune that removes rows. `prune` has no caller yet, so no read-only query is affected.
 Proof: new tests plus all of `tests/acceptance/test_t28.py`, `make build`, `make lint`, `make test`.
 
 ## Attempt 3 (R3)

@@ -2,8 +2,9 @@
 
 Every row carries a cursor `n`, an integer that only goes up. Writers (any process) take a file lock, give the
 rows the next numbers and append them in one write, so file order is cursor order. The highest number ever given is
-kept in `activity.seq`, so cursors stay valid after pruning, even when pruning empties the file. Readers take no
-lock and never write; a half-written last line is ignored.
+kept in `activity.seq`, so cursors stay valid after pruning, even when pruning empties the file. That mark only goes
+up: every writer stores `max(stored mark, new value)`, and a missing or unreadable mark is recovered from the highest
+`n` in the file. Readers take no lock and never write; a half-written last line is ignored.
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ def _lock(ultron_dir: Path) -> FileLock:
     return FileLock(ultron_dir / "locks" / "activity.lock", timeout=60.0)
 
 
+def _is_cursor(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _parse(data: bytes) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in data.split(b"\n")[:-1]:  # the part after the last newline is unfinished
@@ -42,7 +47,7 @@ def _parse(data: bytes) -> list[dict[str, Any]]:
             row = json.loads(line)
         except ValueError:
             continue
-        if isinstance(row, dict) and isinstance(row.get("n"), int):
+        if isinstance(row, dict) and _is_cursor(row.get("n")):
             rows.append(row)
     return rows
 
@@ -98,14 +103,35 @@ def _mend_tail(path: Path) -> None:
         os.close(fd)
 
 
-def _high_water(ultron_dir: Path) -> int:
-    best = 0
+def _stored_mark(ultron_dir: Path) -> int:
+    """The mark kept in `activity.seq`; 0 when it is missing or unreadable (the file's rows then decide)."""
+    text = _read_bytes(ultron_dir / SEQ_FILE).decode("ascii", "replace").strip()
+    return int(text) if text.isdigit() else 0
+
+
+def _high_water(
+    ultron_dir: Path, rows: Sequence[Mapping[str, Any]] | None = None
+) -> int:
+    """The highest cursor ever given: the stored mark or the highest `n` in the file, whichever is higher."""
+    if rows is None:
+        rows = _parse(_read_bytes(ultron_dir / ACTIVITY_FILE))
+    return max([_stored_mark(ultron_dir), *(int(r["n"]) for r in rows)])
+
+
+def _raise_mark(ultron_dir: Path, value: int) -> None:
+    """Under the lock: store `max(stored mark, value)`. The mark never goes down; it is replaced atomically, so a
+    crash cannot leave it empty or half-written."""
+    stored = _stored_mark(ultron_dir)
+    mark = max(value, stored)
+    target = ultron_dir / SEQ_FILE
+    if mark == stored and target.exists():
+        return
+    tmp = ultron_dir / (SEQ_FILE + ".tmp")
+    tmp.write_text(str(mark), encoding="ascii")
     try:
-        best = int((ultron_dir / SEQ_FILE).read_text(encoding="ascii").strip() or 0)
-    except (OSError, ValueError):
-        pass
-    rows = _parse(_read_bytes(ultron_dir / ACTIVITY_FILE))
-    return max([best, *(int(r["n"]) for r in rows)])
+        _replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def append_activity(ultron_dir: Path | str, rows: Sequence[Mapping[str, Any]]) -> int:
@@ -133,7 +159,7 @@ def append_activity(ultron_dir: Path | str, rows: Sequence[Mapping[str, Any]]) -
                 view = view[os.write(fd, view) :]
         finally:
             os.close(fd)
-        (base / SEQ_FILE).write_text(str(n), encoding="ascii")
+        _raise_mark(base, n)
     return n
 
 
@@ -160,14 +186,18 @@ def prune(
     now: datetime | None = None,
     retention: timedelta = RETENTION,
 ) -> int:
-    """Drop activity of requirements completed more than `retention` ago; return how many rows went."""
+    """Drop activity of requirements completed more than `retention` ago; return how many rows went.
+
+    Every prune first records the high-water mark (`activity.seq`, never lowered), even when nothing goes."""
     repo, base = Path(root), Path(ultron_dir)
     moment = now if now is not None else datetime.now(UTC)
-    if not (base / ACTIVITY_FILE).exists():
-        return 0
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = base / (ACTIVITY_FILE + ".tmp")
     with _lock(base):
-        data = _read_bytes(base / ACTIVITY_FILE)
-        rows = _parse(data)
+        tmp.unlink(missing_ok=True)  # left by a prune that crashed before its replace
+        rows = _parse(_read_bytes(base / ACTIVITY_FILE))
+        # Before any row goes, the mark must cover every cursor given, including the rows removed now.
+        _raise_mark(base, _high_water(base, rows))
         decided: dict[str, bool] = {}
 
         def expired(requirement: str) -> bool:
@@ -179,12 +209,10 @@ def prune(
         keep = [r for r in rows if not expired(str(r.get("requirement", "")))]
         removed = len(rows) - len(keep)
         if removed:
-            if rows:
-                (base / SEQ_FILE).write_text(
-                    str(max(int(r["n"]) for r in rows)), encoding="ascii"
-                )
             text = "".join(json.dumps(r) + "\n" for r in keep)
-            tmp = base / (ACTIVITY_FILE + ".tmp")
             tmp.write_bytes(text.encode("utf-8"))
-            _replace(tmp, base / ACTIVITY_FILE)
+            try:
+                _replace(tmp, base / ACTIVITY_FILE)
+            finally:
+                tmp.unlink(missing_ok=True)
     return removed
