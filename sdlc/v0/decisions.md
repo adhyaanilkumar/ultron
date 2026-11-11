@@ -28,3 +28,4 @@
 | 2026-11-11 | merge | v0/T04 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T14 into v0-design | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T35 into v0-design | adhyaanilkumar | approve | |
+| 2026-11-11 | settings | Fable use (self-build) | adhyaanilkumar | restrict | Fable 5.2 (R6) only after a counted failure at R5 |
