@@ -132,3 +132,4 @@ For every task that needs more than one attempt: what each attempt did different
 |---|---|---|---|
 | 1 | R1 | First implementation | Failed (4 tests): prune vs open reader on Windows; torn tail swallows the next row; old attempt shown as current; untrusted wrapper can be closed by content |
 | 2 | R2 | Retry the prune replace; repair a torn tail under the lock before appending; filter by attempt and newest start; escape `untrusted-data` tags in content | Developer green (3156 passed, all of test_t28.py); in testing |
+| 2026-11-11 | settings | agent types (self-build) | adhyaanilkumar | keep general-purpose | per-role agent classes go to a later version (backlog) |
