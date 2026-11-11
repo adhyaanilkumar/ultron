@@ -144,7 +144,8 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | 1 | R3 | Denylist permission policy with a quote-aware shell parser; post-call diff check inside the worktree | Failed (63 tests): many policy bypasses; usage-limit misclassified from the agent's text; interrupt over 5 s when the session hangs |
-| 2 | R4 | Deny-by-default Bash allowlist instead of a denylist; outside-worktree and `.git` checks after every call; classify from SDK error fields only; one overall 5 s interrupt budget; PowerShell removed; `repocheck` snapshot/compare after each call | Developer green (3717 passed, all of test_t16.py); in testing. Residual risk: agent-written code run by an allowed command |
+| 2 | R4 | Deny-by-default Bash allowlist instead of a denylist; outside-worktree and `.git` checks after every call; classify from SDK error fields only; one overall 5 s interrupt budget; PowerShell removed; `repocheck` snapshot/compare after each call | Failed (22 tests): option re-parsing bypasses; deleted `.git` link skips the after-call check |
+| 3 | R5 | Per-program option allowlists (deny every option not listed); Glob/Grep paths trimmed like the CLI; re-check paths after each command in a chain; a worktree that stops being one is reported | In progress |
 | 2026-11-11 | attempt | T28 attempt 2 (R2) | engine | fail | 9 failed, 3202 passed: a second prune lowers activity.seq, so new rows reuse cursors a follower already passed; climb to R3 for attempt 3 (last) |
 | 2026-11-11 | result | T08 D29 | adhyaanilkumar | approve | |
 | 2026-11-11 | merge | v0/T08 (D29) into v0-design | adhyaanilkumar | approve | |
@@ -155,3 +156,4 @@ For every task that needs more than one attempt: what each attempt did different
 | Attempt | Rung | What was different | Result |
 |---|---|---|---|
 | Reopen (owner, not counted) | R4 | Root cause: antivirus scan on every read-open inside the lock, plus the releaser re-taking the polling lock. One kept read handle per EventLog opened outside the lock; a "turn" lock so the releaser can't barge; jittered polling | Developer: flaky test 30/30 unloaded (max 0.76 s) and under load (max 9.5 s); in testing |
+| 2026-11-11 | attempt | T16 attempt 2 (R4) | engine | fail | 22 failed, 3779 passed: 21 bypasses through options that allowed programs re-parse (ruff --config, pytest -o/-c/@file/--pastebin/-p, mypy @file/--install, git blame -S, wc --files0-from, Glob/Grep paths with leading spaces, symlink created mid-chain); after-call check skips silently if the worktree .git link is deleted; climb to R5 for attempt 3 (last) |
